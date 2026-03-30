@@ -26,9 +26,10 @@ import Animated, {
   ZoomIn,
 } from 'react-native-reanimated';
 import { Colors } from '@/constants/Colors';
-import { PantryItem, IngredientCategory } from '@/types';
+import { PantryItem, IngredientCategory, NeedsReviewItem } from '@/types';
 import { usePantry } from '@/hooks/usePantry';
 import { useAuth } from '@/hooks/useAuth';
+import { getNeedsReviewItems, dismissNeedsReviewItem } from '@/services/cookedRecipes';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -223,9 +224,9 @@ function AddItemModal({
   };
 
   return (
-    <Modal visible={visible} transparent animationType="slide">
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalCard}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={styles.modalOverlay} onPress={onClose}>
+        <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
           <View style={styles.modalHandle} />
           <Text style={styles.modalTitle}>Add Ingredient</Text>
 
@@ -272,8 +273,8 @@ function AddItemModal({
               <Text style={styles.addBtnText}>Add Item</Text>
             </TouchableOpacity>
           </View>
-        </View>
-      </View>
+        </Pressable>
+      </Pressable>
     </Modal>
   );
 }
@@ -288,6 +289,7 @@ export default function PantryScreen() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<IngredientCategory | 'all'>('all');
+  const [needsReviewItems, setNeedsReviewItems] = useState<NeedsReviewItem[]>([]);
 
   // FAB animation
   const fabScale = useSharedValue(0);
@@ -298,6 +300,8 @@ export default function PantryScreen() {
   useFocusEffect(
     useCallback(() => {
       refetch();
+      // Load Needs Review items
+      getNeedsReviewItems().then(setNeedsReviewItems);
       // Pop in the FAB
       fabScale.value = withSpring(1, { damping: 14, stiffness: 200 });
       return () => {
@@ -305,6 +309,11 @@ export default function PantryScreen() {
       };
     }, [refetch])
   );
+
+  const handleDismissReviewItem = async (id: string) => {
+    const updated = await dismissNeedsReviewItem(id);
+    setNeedsReviewItems(updated);
+  };
 
   const lowItems = items.filter((i) => i.isLow);
   const organicCount = items.filter((i) => i.isOrganic).length;
@@ -375,6 +384,40 @@ export default function PantryScreen() {
             )}
           </View>
         </Animated.View>
+
+        {/* ── Needs Review ── */}
+        {needsReviewItems.length > 0 && (
+          <Animated.View entering={FadeInDown.delay(80).springify()} style={styles.reviewSection}>
+            <View style={styles.reviewHeader}>
+              <Text style={styles.reviewHeaderTitle}>⚠️ Needs Review</Text>
+              <Text style={styles.reviewHeaderSub}>
+                These ingredients were skipped when updating your pantry — adjust them manually.
+              </Text>
+            </View>
+
+            {needsReviewItems.map((item, i) => (
+              <Animated.View
+                key={item.id}
+                entering={FadeInDown.delay(i * 40).springify()}
+                layout={LinearTransition.springify()}
+                style={styles.reviewItem}
+              >
+                <View style={styles.reviewItemInfo}>
+                  <Text style={styles.reviewItemName}>{item.ingredientName}</Text>
+                  <Text style={styles.reviewItemSource}>
+                    from {item.recipeName}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.reviewDismissBtn}
+                  onPress={() => handleDismissReviewItem(item.id)}
+                >
+                  <Text style={styles.reviewDismissText}>✓ Done</Text>
+                </TouchableOpacity>
+              </Animated.View>
+            ))}
+          </Animated.View>
+        )}
 
         {/* ── Bento Category Grid ── */}
         {items.length > 0 && (
@@ -592,6 +635,67 @@ const styles = StyleSheet.create({
   statChipText: { fontSize: 12, fontWeight: '600', color: Colors.onSurfaceVariant },
 
   // Bento
+  // Needs Review section
+  reviewSection: {
+    marginHorizontal: 20,
+    marginBottom: 16,
+    backgroundColor: Colors.errorContainer ?? '#FFF3E0',
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: Colors.error ?? '#E57373',
+    opacity: 1,
+  },
+  reviewHeader: {
+    marginBottom: 10,
+  },
+  reviewHeaderTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: Colors.error ?? '#C62828',
+    marginBottom: 3,
+  },
+  reviewHeaderSub: {
+    fontSize: 12,
+    color: Colors.onSurfaceVariant,
+    lineHeight: 17,
+  },
+  reviewItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.surface,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 6,
+    gap: 10,
+  },
+  reviewItemInfo: {
+    flex: 1,
+  },
+  reviewItemName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: Colors.onSurface,
+    textTransform: 'capitalize',
+  },
+  reviewItemSource: {
+    fontSize: 11,
+    color: Colors.onSurfaceVariant,
+    marginTop: 2,
+  },
+  reviewDismissBtn: {
+    backgroundColor: Colors.primaryContainer,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  reviewDismissText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Colors.primary,
+  },
+
   bentoSection: { marginBottom: 4 },
   bentoScroll: { paddingHorizontal: 20, gap: 10 },
   bentoCard: {

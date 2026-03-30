@@ -3,6 +3,7 @@ import {
   Text,
   ScrollView,
   TouchableOpacity,
+  Pressable,
   StyleSheet,
   SafeAreaView,
   Image,
@@ -12,7 +13,7 @@ import {
   ActivityIndicator,
   Share,
 } from 'react-native';
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import Animated, {
   FadeIn,
@@ -22,12 +23,34 @@ import Animated, {
 } from 'react-native-reanimated';
 import * as Speech from 'expo-speech';
 import { activateKeepAwake, deactivateKeepAwake } from 'expo-keep-awake';
+// expo-speech-recognition requires a dev/production build — not available in Expo Go.
+// We load it dynamically so the app degrades gracefully in Expo Go.
+let ExpoSpeechRecognitionModule: {
+  requestPermissionsAsync: () => Promise<{ granted: boolean }>;
+  start: (opts: object) => void;
+  stop: () => void;
+} | null = null;
+
+let useSpeechRecognitionEvent: (
+  event: string,
+  handler: (e: any) => void
+) => void = () => {};  // no-op hook — safe to call unconditionally
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const stt = require('expo-speech-recognition');
+  ExpoSpeechRecognitionModule = stt.ExpoSpeechRecognitionModule;
+  useSpeechRecognitionEvent = stt.useSpeechRecognitionEvent;
+} catch {
+  // Expo Go: STT unavailable — voice command buttons still render
+}
 
 import { Colors } from '@/constants/Colors';
 import { Recipe } from '@/types';
 import { saveRecipe, removeSavedRecipe, isRecipeSaved, addRating } from '@/services/recipeService';
 import { addItemToList, getShoppingLists, createShoppingList } from '@/services/shoppingService';
 import { updatePantryAfterCooking } from '@/services/pantryService';
+import { markRecipeAsCooked, addNeedsReviewItems } from '@/services/cookedRecipes';
 import { useAuth } from '@/hooks/useAuth';
 
 type Tab = 'ingredients' | 'instructions' | 'reviews';
@@ -160,6 +183,73 @@ export default function RecipeDetailScreen() {
   const [speechEnabled, setSpeechEnabled] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [updatingPantry, setUpdatingPantry] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const cookingStepRef = useRef<number | null>(null);
+
+  // Keep ref in sync with state so event handlers always see current step
+  useEffect(() => {
+    cookingStepRef.current = cookingStep;
+  }, [cookingStep]);
+
+  // ─── Voice command processing ────────────────────────────────────────────────
+  useSpeechRecognitionEvent('result', (event) => {
+    if (!event.isFinal) return;
+    const transcript = event.results?.[0]?.transcript?.toLowerCase().trim() ?? '';
+    if (!transcript) return;
+
+    const step = cookingStepRef.current;
+    if (step === null || !recipe) return;
+
+    const totalStepsRef = recipe.steps.length;
+
+    if (
+      transcript.includes('next') ||
+      transcript.includes('forward') ||
+      transcript.includes('continue')
+    ) {
+      if (step < totalStepsRef - 1) {
+        setCookingStep(step + 1);
+      }
+    } else if (
+      transcript.includes('previous') ||
+      transcript.includes('back') ||
+      transcript.includes('go back')
+    ) {
+      if (step > 0) {
+        setCookingStep(step - 1);
+      }
+    } else if (transcript.includes('repeat') || transcript.includes('again')) {
+      speakCurrentStep(step);
+    } else if (transcript.includes('stop') || transcript.includes('quiet') || transcript.includes('mute')) {
+      void Speech.stop();
+      setIsSpeaking(false);
+    } else if (
+      transcript.includes('done') ||
+      transcript.includes('finished') ||
+      transcript.includes('cooked') ||
+      transcript.includes('complete')
+    ) {
+      void handleCookedIt();
+    } else if (transcript.includes('read') || transcript.includes('play')) {
+      speakCurrentStep(step);
+    }
+
+    // Restart listening after processing a command
+    startListening();
+  });
+
+  useSpeechRecognitionEvent('end', () => {
+    // Auto-restart listening if cooking mode is active
+    if (cookingStepRef.current !== null && isListening) {
+      startListening();
+    } else {
+      setIsListening(false);
+    }
+  });
+
+  useSpeechRecognitionEvent('error', () => {
+    setIsListening(false);
+  });
 
   useEffect(() => {
     if (recipeParam) {
@@ -186,6 +276,11 @@ export default function RecipeDetailScreen() {
       deactivateKeepAwake();
       void Speech.stop();
       setIsSpeaking(false);
+      // Stop listening when leaving cooking mode
+      if (isListening) {
+        ExpoSpeechRecognitionModule?.stop();
+        setIsListening(false);
+      }
     }
 
     return () => {
@@ -276,13 +371,58 @@ export default function RecipeDetailScreen() {
 
     setSubmittingRating(true);
     try {
-      await addRating(user.uid, recipe.id, userRating, userComment);
+      const result = await addRating(user.uid, recipe.id, userRating, userComment);
+      // Optimistically update the displayed rating in-screen
+      setRecipe((prev) =>
+        prev
+          ? { ...prev, rating: result.newAverage, ratingCount: result.newCount }
+          : prev
+      );
       setShowRatingModal(false);
-      Alert.alert('Thanks!', 'Your rating has been submitted.');
+      setUserRating(0);
+      setUserComment('');
+      Alert.alert('Thanks!', `Your ${userRating}★ rating has been saved.`);
     } catch {
       Alert.alert('Error', 'Could not submit rating.');
     } finally {
       setSubmittingRating(false);
+    }
+  };
+
+  const startListening = async () => {
+    if (!ExpoSpeechRecognitionModule) {
+      Alert.alert(
+        'Voice Commands Unavailable',
+        'STT requires a development or production build — not available in Expo Go.'
+      );
+      return;
+    }
+    try {
+      const result = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!result.granted) return;
+      ExpoSpeechRecognitionModule.start({
+        lang: 'en-US',
+        interimResults: false,
+        continuous: false,
+      });
+      setIsListening(true);
+    } catch {
+      setIsListening(false);
+    }
+  };
+
+  const stopListening = () => {
+    try {
+      ExpoSpeechRecognitionModule?.stop();
+    } catch {}
+    setIsListening(false);
+  };
+
+  const toggleListening = () => {
+    if (isListening) {
+      stopListening();
+    } else {
+      void startListening();
     }
   };
 
@@ -319,8 +459,17 @@ export default function RecipeDetailScreen() {
     if (!user || !recipe) return;
 
     setUpdatingPantry(true);
+    // Stop listening before async ops
+    if (isListening) stopListening();
+
     try {
       const result = await updatePantryAfterCooking(user.uid, recipe);
+
+      // Persist cooked record and any skipped ingredients for Needs Review
+      await markRecipeAsCooked(recipe.id, recipe.title, result.skippedIngredients);
+      if (result.skippedIngredients.length > 0) {
+        await addNeedsReviewItems(recipe.id, recipe.title, result.skippedIngredients);
+      }
 
       setCookingStep(null);
 
@@ -332,7 +481,7 @@ export default function RecipeDetailScreen() {
           ? `${result.removedItems} pantry item${result.removedItems !== 1 ? 's' : ''} removed`
           : '',
         result.skippedIngredients.length > 0
-          ? `${result.skippedIngredients.length} ingredient${result.skippedIngredients.length !== 1 ? 's' : ''} skipped because quantity could not be safely adjusted`
+          ? `${result.skippedIngredients.length} ingredient${result.skippedIngredients.length !== 1 ? 's' : ''} couldn't be auto-adjusted — check Needs Review in your pantry`
           : '',
       ]
         .filter(Boolean)
@@ -370,13 +519,29 @@ export default function RecipeDetailScreen() {
           <Text style={styles.cookingProgress}>
             {cookingStep + 1} / {totalSteps}
           </Text>
-          <TouchableOpacity
-            onPress={() => setSpeechEnabled((prev) => !prev)}
-            style={styles.voiceToggle}
-          >
-            <Text style={styles.voiceToggleText}>{speechEnabled ? '🔊' : '🔈'}</Text>
-          </TouchableOpacity>
+          <View style={styles.cookingHeaderRight}>
+            <TouchableOpacity
+              onPress={toggleListening}
+              style={[styles.voiceToggle, isListening && styles.voiceToggleActive]}
+            >
+              <Text style={styles.voiceToggleText}>{isListening ? '🎙️' : '🎤'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => setSpeechEnabled((prev) => !prev)}
+              style={styles.voiceToggle}
+            >
+              <Text style={styles.voiceToggleText}>{speechEnabled ? '🔊' : '🔈'}</Text>
+            </TouchableOpacity>
+          </View>
         </Animated.View>
+
+        {isListening && (
+          <Animated.View entering={FadeIn.duration(200)} style={styles.listeningBanner}>
+            <Text style={styles.listeningBannerText}>
+              🎙️ Listening… say "next", "previous", "repeat", or "finished"
+            </Text>
+          </Animated.View>
+        )}
 
         <View style={styles.cookingProgressBar}>
           <View
@@ -646,9 +811,15 @@ export default function RecipeDetailScreen() {
         </SafeAreaView>
       </Animated.View>
 
-      <Modal visible={showRatingModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.ratingModal}>
+      <Modal
+        visible={showRatingModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowRatingModal(false)}
+      >
+        <Pressable style={styles.modalOverlay} onPress={() => setShowRatingModal(false)}>
+          <Pressable style={styles.ratingModal} onPress={(e) => e.stopPropagation()}>
+
             <Text style={styles.ratingModalTitle}>Rate This Recipe</Text>
             <Text style={styles.ratingModalSub}>{recipe.title}</Text>
 
@@ -686,8 +857,8 @@ export default function RecipeDetailScreen() {
                 )}
               </TouchableOpacity>
             </View>
-          </View>
-        </View>
+          </Pressable>
+        </Pressable>
       </Modal>
     </View>
   );
@@ -1180,12 +1351,36 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: Colors.onSurfaceVariant,
   },
+  cookingHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
   voiceToggle: {
-    minWidth: 44,
-    alignItems: 'flex-end',
+    minWidth: 40,
+    alignItems: 'center',
+    padding: 4,
+    borderRadius: 8,
+  },
+  voiceToggleActive: {
+    backgroundColor: Colors.primaryContainer ?? 'rgba(76,175,80,0.18)',
   },
   voiceToggleText: {
     fontSize: 20,
+  },
+  listeningBanner: {
+    marginHorizontal: 20,
+    marginBottom: 6,
+    backgroundColor: Colors.primaryContainer ?? 'rgba(76,175,80,0.15)',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  listeningBannerText: {
+    fontSize: 12,
+    color: Colors.primary,
+    fontWeight: '600',
+    textAlign: 'center',
   },
   cookingProgressBar: {
     height: 4,

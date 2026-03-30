@@ -31,9 +31,20 @@ export interface PantryItem {
   imageUri?: string;
 }
 
+// ─── Needs Review (skipped pantry adjustments after cooking) ──────────────────
+export interface NeedsReviewItem {
+  id: string;
+  ingredientName: string;
+  recipeName: string;
+  recipeId: string;
+  cookedAt: string;       // ISO date string
+  reason: 'no_match' | 'unit_mismatch' | 'no_quantity';
+}
+
 // ─── Recipes ──────────────────────────────────────────────────────────────────
 export type DifficultyLevel = 'Easy' | 'Medium' | 'Intermediate' | 'Expert';
 export type RecipeMatch = 'full' | 'partial';
+export type RecipeStatus = 'active' | 'cooked' | 'skipped';
 
 export interface RecipeIngredient {
   name: string;
@@ -56,6 +67,10 @@ export interface NutritionalInfo {
   carbs: string;
   fat: string;
   fiber?: string;
+  // Spoonacular-enriched fields
+  sugar?: string;
+  sodium?: string;
+  dataSource?: 'ai' | 'spoonacular';
 }
 
 export interface Recipe {
@@ -81,6 +96,10 @@ export interface Recipe {
   createdAt: string;
   source?: 'ai-generated' | 'internet';
   isAiGenerated?: boolean;
+  // Status tracking
+  status?: RecipeStatus;
+  cookedAt?: string;     // ISO date string, set when user completes cooking
+  spoonacularId?: number; // Spoonacular recipe ID if enriched
 }
 
 // ─── Saved / Cookbook ─────────────────────────────────────────────────────────
@@ -102,6 +121,21 @@ export interface RecipeRating {
   rating: number;        // 1–5
   comment?: string;
   createdAt: string;
+}
+
+// ─── Cooked Record ────────────────────────────────────────────────────────────
+export interface CookedRecord {
+  recipeId: string;
+  recipeTitle: string;
+  cookedAt: string;      // ISO date string
+  skippedIngredients: string[];
+}
+
+// ─── Generation Progress ──────────────────────────────────────────────────────
+export interface GenerationProgress {
+  step: string;          // human-readable label
+  current: number;       // 0-based index
+  total: number;
 }
 
 // ─── Shopping ─────────────────────────────────────────────────────────────────

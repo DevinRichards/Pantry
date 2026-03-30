@@ -168,9 +168,9 @@ function AddItemModal({
   };
 
   return (
-    <Modal visible={visible} transparent animationType="slide">
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalCard}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={styles.modalOverlay} onPress={onClose}>
+        <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
           <View style={styles.modalHandle} />
           <Text style={styles.modalTitle}>Add to List</Text>
 
@@ -217,8 +217,8 @@ function AddItemModal({
               <Text style={styles.addBtnText}>Add Item</Text>
             </TouchableOpacity>
           </View>
-        </View>
-      </View>
+        </Pressable>
+      </Pressable>
     </Modal>
   );
 }

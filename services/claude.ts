@@ -1,23 +1,21 @@
 /**
  * Claude AI Service
  * Handles ingredient detection from photos and AI recipe generation.
+ * Recipes are enriched with Spoonacular data (real nutrition + images) when available.
  *
  * NOTE: In production, these calls should be proxied through a backend server
  * to keep your API key secure. For development/demo purposes, the key is stored
  * in your .env file and prefixed with EXPO_PUBLIC_.
  */
-import { DetectedIngredient, PantryItem, Recipe, RecipeIngredient } from '@/types';
+import { DetectedIngredient, GenerationProgress, PantryItem, Recipe, RecipeIngredient } from '@/types';
+import { enrichRecipeData } from './spoonacular';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-opus-4-6';
 
 function getHeaders() {
   const apiKey = process.env.EXPO_PUBLIC_ANTHROPIC_API_KEY ?? '';
-
-  if (!apiKey) {
-    throw new Error('Missing EXPO_PUBLIC_ANTHROPIC_API_KEY in environment.');
-  }
-
+  if (!apiKey) throw new Error('Missing EXPO_PUBLIC_ANTHROPIC_API_KEY in environment.');
   return {
     'Content-Type': 'application/json',
     'x-api-key': apiKey,
@@ -65,18 +63,8 @@ Be thorough but only include items you can actually see or strongly infer from t
         {
           role: 'user',
           content: [
-            {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: mimeType,
-                data: base64Image,
-              },
-            },
-            {
-              type: 'text',
-              text: prompt,
-            },
+            { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Image } },
+            { type: 'text', text: prompt },
           ],
         },
       ],
@@ -93,25 +81,16 @@ Be thorough but only include items you can actually see or strongly infer from t
 
   const start = content.indexOf('[');
   const end = content.lastIndexOf(']');
-
   if (start === -1 || end === -1 || end <= start) {
     console.log('Raw Claude ingredient response:', content);
     throw new Error('Could not parse ingredient list from AI response');
   }
 
-  const jsonText = content.slice(start, end + 1);
-
   try {
-    const parsed = JSON.parse(jsonText) as DetectedIngredient[];
-
-    if (!Array.isArray(parsed)) {
-      throw new Error('Ingredient response was not an array');
-    }
-
+    const parsed = JSON.parse(content.slice(start, end + 1)) as DetectedIngredient[];
+    if (!Array.isArray(parsed)) throw new Error('Ingredient response was not an array');
     return parsed;
   } catch (err) {
-    console.log('Failed ingredient JSON:', jsonText);
-    console.log('Ingredient JSON parse error:', err);
     throw new Error('AI returned invalid ingredient data. Please try again.');
   }
 }
@@ -131,13 +110,17 @@ type SingleRecipeOptions = {
   excludeCuisines?: string[];
 };
 
+export type GenerateRecipesOptions = {
+  preferences?: RecipePreferences;
+  onProgress?: (progress: GenerationProgress) => void;
+};
+
 function buildIngredientList(pantryItems: PantryItem[]): string {
   return pantryItems.map((item) => `- ${item.name}: ${item.quantity}`).join('\n');
 }
 
 function buildPreferencesText(preferences?: RecipePreferences): string {
   if (!preferences) return '';
-
   return `
 User preferences:
 - Dietary restrictions: ${preferences.dietaryRestrictions?.join(', ') || 'None'}
@@ -154,12 +137,8 @@ function buildSingleRecipePrompt(
 ): string {
   const ingredientList = buildIngredientList(pantryItems);
   const prefsText = buildPreferencesText(preferences);
-  const excludeTitles = options.excludeTitles?.length
-    ? options.excludeTitles.join(', ')
-    : 'None';
-  const excludeCuisines = options.excludeCuisines?.length
-    ? options.excludeCuisines.join(', ')
-    : 'None';
+  const excludeTitles = options.excludeTitles?.length ? options.excludeTitles.join(', ') : 'None';
+  const excludeCuisines = options.excludeCuisines?.length ? options.excludeCuisines.join(', ') : 'None';
 
   const matchInstructions =
     options.matchType === 'full'
@@ -190,9 +169,7 @@ Variety rules:
 - Step descriptions must be short, clear, and one sentence each
 - Prefer realistic recipes based on the provided pantry
 
-Return ONLY a valid JSON object.
-Do not use markdown.
-Do not include any text before or after the JSON.
+Return ONLY a valid JSON object. Do not use markdown. Do not include any text before or after the JSON.
 
 Use this exact structure:
 {
@@ -207,22 +184,18 @@ Use this exact structure:
   "cuisine": "Italian",
   "tags": ["quick", "healthy"],
   "ingredients": [
-    {
-      "name": "Ingredient Name",
-      "amount": "2 cups",
-      "inPantry": true,
-      "optional": false
-    }
+    { "name": "Ingredient Name", "amount": "2 cups", "inPantry": true, "optional": false }
   ],
   "steps": [
-    {
-      "stepNumber": 1,
-      "title": "Step Title",
-      "description": "Short instruction sentence.",
-      "duration": "5 minutes",
-      "tip": "Optional short tip"
-    }
+    { "stepNumber": 1, "title": "Step Title", "description": "Short instruction.", "duration": "5 minutes", "tip": "Optional tip" }
   ],
+  "nutrition": {
+    "calories": 420,
+    "protein": "28g",
+    "carbs": "35g",
+    "fat": "14g",
+    "fiber": "4g"
+  },
   "matchType": "${options.matchType}",
   "matchPercent": ${options.matchType === 'full' ? 100 : 75},
   "missingIngredients": [],
@@ -234,15 +207,17 @@ Use this exact structure:
 function extractJsonObject(text: string): string {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
-
   if (start === -1 || end === -1 || end <= start) {
     throw new Error('Could not parse recipe from AI response');
   }
-
   return text.slice(start, end + 1);
 }
 
-function normalizeRecipe(recipe: Partial<Recipe>, fallbackId: string, matchType: 'full' | 'partial'): Recipe {
+function normalizeRecipe(
+  recipe: Partial<Recipe>,
+  fallbackId: string,
+  matchType: 'full' | 'partial'
+): Recipe {
   return {
     id: recipe.id || fallbackId,
     title: recipe.title || 'Untitled Recipe',
@@ -268,28 +243,26 @@ function normalizeRecipe(recipe: Partial<Recipe>, fallbackId: string, matchType:
           tip: step.tip ?? '',
         }))
       : [],
-    nutrition: recipe.nutrition || {
+    nutrition: recipe.nutrition ?? {
       calories: 0,
       protein: '0g',
       carbs: '0g',
       fat: '0g',
       fiber: '0g',
+      dataSource: 'ai',
     },
     matchType: recipe.matchType || matchType,
     matchPercent:
       typeof recipe.matchPercent === 'number'
         ? recipe.matchPercent
-        : matchType === 'full'
-          ? 100
-          : 75,
-    missingIngredients: Array.isArray(recipe.missingIngredients)
-      ? recipe.missingIngredients
-      : [],
-    rating: typeof recipe.rating === 'number' ? recipe.rating : 4.5,
+        : matchType === 'full' ? 100 : 75,
+    missingIngredients: Array.isArray(recipe.missingIngredients) ? recipe.missingIngredients : [],
+    rating: typeof recipe.rating === 'number' ? recipe.rating : undefined,
     ratingCount: typeof recipe.ratingCount === 'number' ? recipe.ratingCount : 0,
     createdAt: recipe.createdAt || new Date().toISOString(),
     source: recipe.source || 'ai-generated',
     isAiGenerated: recipe.isAiGenerated ?? true,
+    status: 'active',
   };
 }
 
@@ -308,12 +281,7 @@ async function generateSingleRecipe(
       model: MODEL,
       max_tokens: 1400,
       temperature: 0.2,
-      messages: [
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
+      messages: [{ role: 'user', content: prompt }],
     }),
   });
 
@@ -325,16 +293,11 @@ async function generateSingleRecipe(
   const data = await response.json();
   const content = data.content?.[0]?.text ?? '';
 
-  console.log(`Raw Claude recipe ${recipeNumber} response:`, content);
-
   const jsonText = extractJsonObject(content);
-
   try {
     const parsed = JSON.parse(jsonText) as Partial<Recipe>;
-    return normalizeRecipe(parsed, `recipe_${recipeNumber}`, options.matchType);
-  } catch (err) {
-    console.log(`Failed recipe ${recipeNumber} JSON:`, jsonText);
-    console.log(`Recipe ${recipeNumber} JSON parse error:`, err);
+    return normalizeRecipe(parsed, `recipe_${Date.now()}_${recipeNumber}`, options.matchType);
+  } catch {
     throw new Error(`AI returned invalid recipe ${recipeNumber} data. Please try again.`);
   }
 }
@@ -347,68 +310,86 @@ async function generateSingleRecipeWithRetry(
   maxAttempts = 2
 ): Promise<Recipe> {
   let lastError: unknown;
-
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       return await generateSingleRecipe(pantryItems, preferences, options, recipeNumber);
     } catch (error) {
       lastError = error;
-      console.log(`Recipe ${recipeNumber} generation attempt ${attempt} failed:`, error);
+      console.log(`Recipe ${recipeNumber} attempt ${attempt} failed:`, error);
     }
   }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error(`Failed to generate recipe ${recipeNumber}.`);
+  throw lastError instanceof Error ? lastError : new Error(`Failed to generate recipe ${recipeNumber}.`);
 }
+
+/**
+ * Enrich a recipe with Spoonacular data (real nutrition + HD image).
+ * Falls back silently to AI data if Spoonacular is unavailable.
+ */
+async function enrichWithSpoonacular(recipe: Recipe): Promise<Recipe> {
+  try {
+    const enriched = await enrichRecipeData(recipe.title);
+    if (!enriched) return recipe;
+
+    return {
+      ...recipe,
+      imageUrl: enriched.imageUrl,
+      spoonacularId: enriched.spoonacularId,
+      nutrition: {
+        ...recipe.nutrition,
+        ...enriched.nutrition,
+      },
+    };
+  } catch {
+    return recipe; // always fall back gracefully
+  }
+}
+
+// ─── Main Export ──────────────────────────────────────────────────────────────
 
 export async function generateRecipes(
   pantryItems: PantryItem[],
-  preferences?: RecipePreferences
+  options: GenerateRecipesOptions = {}
 ): Promise<Recipe[]> {
+  const { preferences, onProgress } = options;
+
   if (!pantryItems.length) {
     throw new Error('Add some pantry items before generating recipes.');
   }
 
   const recipes: Recipe[] = [];
 
-  const recipe1 = await generateSingleRecipeWithRetry(
-    pantryItems,
-    preferences,
-    {
-      matchType: 'full',
-      excludeTitles: [],
-      excludeCuisines: [],
-    },
-    1
-  );
+  // ── Recipe 1: Full match ──
+  onProgress?.({ step: 'Generating recipe 1 of 3…', current: 0, total: 3 });
+  const recipe1 = await generateSingleRecipeWithRetry(pantryItems, preferences, {
+    matchType: 'full',
+    excludeTitles: [],
+    excludeCuisines: [],
+  }, 1);
   recipes.push(recipe1);
 
-  const recipe2 = await generateSingleRecipeWithRetry(
-    pantryItems,
-    preferences,
-    {
-      matchType: 'full',
-      excludeTitles: recipes.map((r) => r.title),
-      excludeCuisines: recipes.map((r) => r.cuisine),
-    },
-    2
-  );
+  // ── Recipe 2: Full match (variety) ──
+  onProgress?.({ step: 'Generating recipe 2 of 3…', current: 1, total: 3 });
+  const recipe2 = await generateSingleRecipeWithRetry(pantryItems, preferences, {
+    matchType: 'full',
+    excludeTitles: recipes.map((r) => r.title),
+    excludeCuisines: recipes.map((r) => r.cuisine ?? ''),
+  }, 2);
   recipes.push(recipe2);
 
-  const recipe3 = await generateSingleRecipeWithRetry(
-    pantryItems,
-    preferences,
-    {
-      matchType: 'partial',
-      excludeTitles: recipes.map((r) => r.title),
-      excludeCuisines: recipes.map((r) => r.cuisine),
-    },
-    3
-  );
+  // ── Recipe 3: Partial match ──
+  onProgress?.({ step: 'Generating recipe 3 of 3…', current: 2, total: 3 });
+  const recipe3 = await generateSingleRecipeWithRetry(pantryItems, preferences, {
+    matchType: 'partial',
+    excludeTitles: recipes.map((r) => r.title),
+    excludeCuisines: recipes.map((r) => r.cuisine ?? ''),
+  }, 3);
   recipes.push(recipe3);
 
-  return recipes;
+  // ── Enrich all recipes with Spoonacular (image + real nutrition) ──
+  onProgress?.({ step: 'Enriching with nutrition data…', current: 2, total: 3 });
+  const enriched = await Promise.all(recipes.map(enrichWithSpoonacular));
+
+  return enriched;
 }
 
 // ─── Shopping List Generation ─────────────────────────────────────────────────
@@ -418,7 +399,6 @@ export async function generateShoppingList(
   currentPantry: PantryItem[]
 ): Promise<{ name: string; quantity: string; category: string; recipeName: string }[]> {
   const pantryNames = currentPantry.map((p) => p.name.toLowerCase());
-
   const missingItems: { name: string; quantity: string; category: string; recipeName: string }[] = [];
 
   for (const recipe of savedRecipes) {
@@ -433,56 +413,17 @@ export async function generateShoppingList(
       }
     }
   }
-
   return missingItems;
 }
 
-// Helper to categorize ingredients for shopping list
 function categorizeIngredient(name: string): string {
   const lower = name.toLowerCase();
-
-  if (['milk', 'cheese', 'butter', 'yogurt', 'cream', 'egg'].some((k) => lower.includes(k))) {
-    return 'Dairy & Eggs';
-  }
-  if (['chicken', 'beef', 'pork', 'lamb', 'salmon', 'tuna', 'fish', 'shrimp'].some((k) => lower.includes(k))) {
-    return 'Meat & Seafood';
-  }
-  if (
-    [
-      'tomato',
-      'onion',
-      'garlic',
-      'spinach',
-      'basil',
-      'pepper',
-      'lettuce',
-      'carrot',
-      'broccoli',
-      'zucchini',
-      'mushroom',
-      'avocado',
-      'lemon',
-      'lime',
-      'apple',
-      'banana',
-      'berry',
-      'fruit',
-      'vegetable',
-      'herb',
-    ].some((k) => lower.includes(k))
-  ) {
-    return 'Produce';
-  }
-  if (['ice cream', 'frozen', 'pea'].some((k) => lower.includes(k))) {
-    return 'Frozen';
-  }
-  if (['bread', 'roll', 'baguette', 'croissant', 'muffin'].some((k) => lower.includes(k))) {
-    return 'Bakery';
-  }
-  if (['flour', 'sugar', 'rice', 'pasta', 'oil', 'vinegar', 'sauce', 'can', 'tin'].some((k) => lower.includes(k))) {
-    return 'Pantry';
-  }
-
+  if (['milk', 'cheese', 'butter', 'yogurt', 'cream', 'egg'].some((k) => lower.includes(k))) return 'Dairy & Eggs';
+  if (['chicken', 'beef', 'pork', 'lamb', 'salmon', 'tuna', 'fish', 'shrimp'].some((k) => lower.includes(k))) return 'Meat & Seafood';
+  if (['tomato','onion','garlic','spinach','basil','pepper','lettuce','carrot','broccoli','zucchini','mushroom','avocado','lemon','lime','apple','banana','berry','fruit','vegetable','herb'].some((k) => lower.includes(k))) return 'Produce';
+  if (['ice cream', 'frozen', 'pea'].some((k) => lower.includes(k))) return 'Frozen';
+  if (['bread', 'roll', 'baguette', 'croissant', 'muffin'].some((k) => lower.includes(k))) return 'Bakery';
+  if (['flour', 'sugar', 'rice', 'pasta', 'oil', 'vinegar', 'sauce', 'can', 'tin'].some((k) => lower.includes(k))) return 'Pantry';
   return 'Other';
 }
 
@@ -496,17 +437,14 @@ export async function generateChefTip(ingredient: string): Promise<string> {
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 200,
       temperature: 0.2,
-      messages: [
-        {
-          role: 'user',
-          content: `Give me one practical chef's tip about storing or using ${ingredient}. Keep it under 40 words. Be specific and useful. No intro, just the tip.`,
-        },
-      ],
+      messages: [{
+        role: 'user',
+        content: `Give me one practical chef's tip about storing or using ${ingredient}. Keep it under 40 words. Be specific and useful. No intro, just the tip.`,
+      }],
     }),
   });
 
   if (!response.ok) return '';
-
   const data = await response.json();
   return data.content?.[0]?.text ?? '';
 }
