@@ -12,6 +12,15 @@ import {
 } from 'firebase/firestore';
 import { db } from './firebase';
 import { Recipe, SavedRecipe, RecipeRating } from '@/types';
+import {
+  assertDocumentOwner,
+  assertValidDocId,
+  assertValidUserId,
+  sanitizeComment,
+  sanitizeNotes,
+  sanitizeRating,
+  sanitizeRecipeForStorage,
+} from './security';
 
 const SAVED_COLLECTION = 'savedRecipes';
 const RATINGS_COLLECTION = 'ratings';
@@ -19,7 +28,8 @@ const RATINGS_COLLECTION = 'ratings';
 // ─── Saved Recipes (Cookbook) ─────────────────────────────────────────────────
 
 export async function getSavedRecipes(userId: string): Promise<SavedRecipe[]> {
-  const q = query(collection(db, SAVED_COLLECTION), where('userId', '==', userId));
+  const safeUserId = assertValidUserId(userId);
+  const q = query(collection(db, SAVED_COLLECTION), where('userId', '==', safeUserId));
   const snap = await getDocs(q);
   const items = snap.docs.map((d) => ({ id: d.id, ...d.data() } as SavedRecipe));
   return items.sort(
@@ -28,24 +38,28 @@ export async function getSavedRecipes(userId: string): Promise<SavedRecipe[]> {
 }
 
 export async function saveRecipe(userId: string, recipe: Recipe): Promise<SavedRecipe> {
+  const safeUserId = assertValidUserId(userId);
+  const sanitizedRecipe = sanitizeRecipeForStorage(recipe);
   const data = {
-    userId,
-    recipeId: recipe.id,
-    recipe,
+    userId: safeUserId,
+    recipeId: sanitizedRecipe.id,
+    recipe: sanitizedRecipe,
     savedAt: new Date().toISOString(),
   };
   const docRef = await addDoc(collection(db, SAVED_COLLECTION), data);
   return { id: docRef.id, ...data };
 }
 
-export async function removeSavedRecipe(savedId: string): Promise<void> {
-  await deleteDoc(doc(db, SAVED_COLLECTION, savedId));
+export async function removeSavedRecipe(userId: string, savedId: string): Promise<void> {
+  await assertDocumentOwner(SAVED_COLLECTION, savedId, userId);
+  await deleteDoc(doc(db, SAVED_COLLECTION, assertValidDocId(savedId)));
 }
 
 export async function isRecipeSaved(userId: string, recipeId: string): Promise<string | null> {
+  const safeUserId = assertValidUserId(userId);
   const q = query(
     collection(db, SAVED_COLLECTION),
-    where('userId', '==', userId),
+    where('userId', '==', safeUserId),
     where('recipeId', '==', recipeId)
   );
   const snap = await getDocs(q);
@@ -75,18 +89,23 @@ export async function addRating(
   rating: number,
   comment?: string
 ): Promise<RatingResult> {
+  const safeUserId = assertValidUserId(userId);
+  const safeRecipeId = assertValidDocId(recipeId);
+  const safeRating = sanitizeRating(rating);
+  const safeComment = sanitizeComment(comment);
+
   // Check if user already rated this recipe
   const existingRatingQuery = query(
     collection(db, RATINGS_COLLECTION),
-    where('userId', '==', userId),
-    where('recipeId', '==', recipeId)
+    where('userId', '==', safeUserId),
+    where('recipeId', '==', safeRecipeId)
   );
   const existingSnap = await getDocs(existingRatingQuery);
 
   // Fetch all existing ratings for this recipe (to compute new average)
   const allRatingsQuery = query(
     collection(db, RATINGS_COLLECTION),
-    where('recipeId', '==', recipeId)
+    where('recipeId', '==', safeRecipeId)
   );
   const allRatingsSnap = await getDocs(allRatingsQuery);
   const allRatings = allRatingsSnap.docs.map((d) => d.data() as RecipeRating);
@@ -94,7 +113,7 @@ export async function addRating(
   // Fetch saved recipe docs that need their rating fields updated
   const savedQuery = query(
     collection(db, SAVED_COLLECTION),
-    where('recipeId', '==', recipeId)
+    where('recipeId', '==', safeRecipeId)
   );
   const savedSnap = await getDocs(savedQuery);
 
@@ -111,13 +130,13 @@ export async function addRating(
     // Recalculate: replace old rating value with new one
     const totalWithoutOld = allRatings.reduce((sum, r) => sum + r.rating, 0) - oldRating;
     newCount = allRatings.length; // count stays the same
-    newAverage = (totalWithoutOld + rating) / newCount;
+    newAverage = (totalWithoutOld + safeRating) / newCount;
 
     ratingData = {
-      recipeId,
-      userId,
-      rating,
-      comment,
+      recipeId: safeRecipeId,
+      userId: safeUserId,
+      rating: safeRating,
+      comment: safeComment,
       createdAt: existingSnap.docs[0].data().createdAt as string,
     };
   } else {
@@ -125,13 +144,13 @@ export async function addRating(
     ratingDocRef = doc(collection(db, RATINGS_COLLECTION));
     const totalExisting = allRatings.reduce((sum, r) => sum + r.rating, 0);
     newCount = allRatings.length + 1;
-    newAverage = (totalExisting + rating) / newCount;
+    newAverage = (totalExisting + safeRating) / newCount;
 
     ratingData = {
-      recipeId,
-      userId,
-      rating,
-      comment,
+      recipeId: safeRecipeId,
+      userId: safeUserId,
+      rating: safeRating,
+      comment: safeComment,
       createdAt: new Date().toISOString(),
     };
   }
@@ -163,9 +182,10 @@ export async function addRating(
 }
 
 export async function getRecipeRatings(recipeId: string): Promise<RecipeRating[]> {
+  const safeRecipeId = assertValidDocId(recipeId);
   const q = query(
     collection(db, RATINGS_COLLECTION),
-    where('recipeId', '==', recipeId)
+    where('recipeId', '==', safeRecipeId)
   );
   const snap = await getDocs(q);
   const ratings = snap.docs.map((d) => ({ id: d.id, ...d.data() } as RecipeRating));
@@ -175,10 +195,12 @@ export async function getRecipeRatings(recipeId: string): Promise<RecipeRating[]
 }
 
 export async function getUserRating(userId: string, recipeId: string): Promise<RecipeRating | null> {
+  const safeUserId = assertValidUserId(userId);
+  const safeRecipeId = assertValidDocId(recipeId);
   const q = query(
     collection(db, RATINGS_COLLECTION),
-    where('userId', '==', userId),
-    where('recipeId', '==', recipeId)
+    where('userId', '==', safeUserId),
+    where('recipeId', '==', safeRecipeId)
   );
   const snap = await getDocs(q);
   return snap.empty ? null : ({ id: snap.docs[0].id, ...snap.docs[0].data() } as RecipeRating);
@@ -187,14 +209,16 @@ export async function getUserRating(userId: string, recipeId: string): Promise<R
 // ─── User Notes on saved recipes ─────────────────────────────────────────────
 
 export async function updateSavedRecipeNotes(
+  userId: string,
   savedId: string,
   notes: string,
   userRating?: number,
   userComment?: string
 ): Promise<void> {
-  await updateDoc(doc(db, SAVED_COLLECTION, savedId), {
-    notes,
-    userRating,
-    userComment,
+  await assertDocumentOwner(SAVED_COLLECTION, savedId, userId);
+  await updateDoc(doc(db, SAVED_COLLECTION, assertValidDocId(savedId)), {
+    notes: sanitizeNotes(notes),
+    userRating: userRating == null ? undefined : sanitizeRating(userRating),
+    userComment: sanitizeComment(userComment),
   });
 }

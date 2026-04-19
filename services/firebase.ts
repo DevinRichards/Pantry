@@ -1,14 +1,9 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import {
-  getAuth,
-  initializeAuth,
-  getReactNativePersistence,
-} from 'firebase/auth';
+import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const firebaseConfig = {
+const requiredConfig = {
   apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
   authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
   projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
@@ -17,18 +12,26 @@ const firebaseConfig = {
   appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID,
 };
 
-// Initialize Firebase (only once)
+for (const [key, value] of Object.entries(requiredConfig)) {
+  if (!value) {
+    throw new Error(`Missing required Firebase configuration: ${key}`);
+  }
+}
+
+const firebaseConfig = {
+  apiKey: requiredConfig.apiKey,
+  authDomain: requiredConfig.authDomain,
+  projectId: requiredConfig.projectId,
+  storageBucket: requiredConfig.storageBucket,
+  messagingSenderId: requiredConfig.messagingSenderId,
+  appId: requiredConfig.appId,
+};
+
+// Initialize Firebase (only once — safe across hot reloads)
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// Auth with AsyncStorage persistence for React Native
-let auth: ReturnType<typeof getAuth>;
-try {
-  auth = initializeAuth(app, {
-    persistence: getReactNativePersistence(AsyncStorage),
-  });
-} catch {
-  auth = getAuth(app);
-}
+// Firebase 11 handles React Native auth persistence automatically
+const auth = getAuth(app);
 
 const db = getFirestore(app);
 const storage = getStorage(app);

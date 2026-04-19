@@ -10,6 +10,14 @@ import {
 } from 'firebase/firestore';
 import { db } from './firebase';
 import { PantryItem, DetectedIngredient, Recipe } from '@/types';
+import {
+  assertDocumentOwner,
+  assertValidDocId,
+  assertValidUserId,
+  sanitizeDetectedIngredients,
+  sanitizePantryItemInput,
+  sanitizePantryItemUpdates,
+} from './security';
 
 const COLLECTION = 'pantryItems';
 
@@ -22,7 +30,8 @@ export type PantryUpdateResult = {
 // ─── CRUD ─────────────────────────────────────────────────────────────────────
 
 export async function getPantryItems(userId: string): Promise<PantryItem[]> {
-  const q = query(collection(db, COLLECTION), where('userId', '==', userId));
+  const safeUserId = assertValidUserId(userId);
+  const q = query(collection(db, COLLECTION), where('userId', '==', safeUserId));
   const snap = await getDocs(q);
 
   const items = snap.docs.map((d) => ({
@@ -39,30 +48,40 @@ export async function addPantryItem(
   userId: string,
   item: Omit<PantryItem, 'id' | 'addedAt'>
 ): Promise<PantryItem> {
+  const safeUserId = assertValidUserId(userId);
+  const sanitizedItem = sanitizePantryItemInput(item);
   const addedAt = new Date().toISOString();
 
   const docRef = await addDoc(collection(db, COLLECTION), {
-    ...item,
-    userId,
+    ...sanitizedItem,
+    userId: safeUserId,
     addedAt,
   });
 
   return {
     id: docRef.id,
-    ...item,
+    ...sanitizedItem,
     addedAt,
   };
 }
 
 export async function updatePantryItem(
+  userId: string,
   itemId: string,
   updates: Partial<Omit<PantryItem, 'id'>>
 ): Promise<void> {
-  await updateDoc(doc(db, COLLECTION, itemId), { ...updates });
+  await assertDocumentOwner(COLLECTION, itemId, userId);
+  const sanitizedUpdates = sanitizePantryItemUpdates(updates);
+  await updateDoc(doc(db, COLLECTION, assertValidDocId(itemId)), { ...sanitizedUpdates });
 }
 
-export async function deletePantryItem(itemId: string): Promise<void> {
-  await deleteDoc(doc(db, COLLECTION, itemId));
+export async function deletePantryItem(userId: string, itemId: string): Promise<void> {
+  await assertDocumentOwner(COLLECTION, itemId, userId);
+  await deleteDoc(doc(db, COLLECTION, assertValidDocId(itemId)));
+}
+
+export async function deletePantryItems(userId: string, itemIds: string[]): Promise<void> {
+  await Promise.all(itemIds.map((id) => deletePantryItem(userId, id)));
 }
 
 // ─── Bulk add from scan ───────────────────────────────────────────────────────
@@ -72,8 +91,9 @@ export async function addDetectedIngredients(
   detected: DetectedIngredient[]
 ): Promise<PantryItem[]> {
   const added: PantryItem[] = [];
+  const sanitizedDetected = sanitizeDetectedIngredients(detected);
 
-  for (const item of detected) {
+  for (const item of sanitizedDetected) {
     const pantryItem: Omit<PantryItem, 'id' | 'addedAt'> = {
       name: item.name,
       quantity: item.quantity ?? 'Unknown amount',
@@ -260,7 +280,8 @@ export async function updatePantryAfterCooking(
   userId: string,
   recipe: Recipe
 ): Promise<PantryUpdateResult> {
-  const pantryItems = await getPantryItems(userId);
+  const safeUserId = assertValidUserId(userId);
+  const pantryItems = await getPantryItems(safeUserId);
 
   let updatedItems = 0;
   let removedItems = 0;
@@ -294,7 +315,7 @@ export async function updatePantryAfterCooking(
     const remaining = pantryParsed.value - recipeParsed.value;
 
     if (remaining <= 0) {
-      await deletePantryItem(pantryItem.id);
+      await deletePantryItem(safeUserId, pantryItem.id);
       removedItems += 1;
 
       const index = pantryItems.findIndex((item) => item.id === pantryItem.id);
@@ -304,7 +325,7 @@ export async function updatePantryAfterCooking(
 
     const normalizedUnit = pantryParsed.unit ?? normalizeUnit(pantryItem.unit ?? null);
 
-    await updatePantryItem(pantryItem.id, {
+    await updatePantryItem(safeUserId, pantryItem.id, {
       amount: remaining,
       unit: normalizedUnit ?? pantryItem.unit,
       quantity: formatQuantity(remaining, normalizedUnit),

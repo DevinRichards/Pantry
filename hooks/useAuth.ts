@@ -8,6 +8,11 @@ import {
   User as FirebaseUser,
 } from 'firebase/auth';
 import { auth } from '@/services/firebase';
+import {
+  normalizeEmail,
+  validateDisplayName,
+  validatePassword,
+} from '@/services/security';
 
 interface AuthState {
   user: FirebaseUser | null;
@@ -32,9 +37,10 @@ export function useAuth() {
   const login = async (email: string, password: string) => {
     setState((prev) => ({ ...prev, loading: true, error: null }));
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      await signInWithEmailAndPassword(auth, normalizeEmail(email), password);
+      // onAuthStateChanged will set loading: false on success
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Login failed';
+      const message = 'Login failed. Check your email and password and try again.';
       setState((prev) => ({ ...prev, loading: false, error: message }));
       throw err;
     }
@@ -43,17 +49,28 @@ export function useAuth() {
   const register = async (email: string, password: string, displayName: string) => {
     setState((prev) => ({ ...prev, loading: true, error: null }));
     try {
-      const cred = await createUserWithEmailAndPassword(auth, email, password);
-      await updateProfile(cred.user, { displayName });
+      validatePassword(password);
+      const sanitizedName = validateDisplayName(displayName);
+      const cred = await createUserWithEmailAndPassword(auth, normalizeEmail(email), password);
+      await updateProfile(cred.user, { displayName: sanitizedName });
+      // onAuthStateChanged will set loading: false on success
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Registration failed';
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Registration failed. Please review your details and try again.';
       setState((prev) => ({ ...prev, loading: false, error: message }));
       throw err;
     }
   };
 
   const logout = async () => {
-    await signOut(auth);
+    setState((prev) => ({ ...prev, loading: true }));
+    try {
+      await signOut(auth);
+    } finally {
+      setState((prev) => ({ ...prev, loading: false }));
+    }
   };
 
   return {

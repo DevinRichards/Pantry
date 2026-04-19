@@ -2,6 +2,7 @@
   "expo": {
     "name": "PantryChef",
     "slug": "pantrychef",
+    "owner": "devinmrichards95",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -15,9 +16,42 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.pantrychef.app",
+      "buildNumber": "1",
       "infoPlist": {
         "NSCameraUsageDescription": "PantryChef uses your camera to scan ingredients in your fridge and pantry.",
-        "NSPhotoLibraryUsageDescription": "PantryChef accesses your photos to analyze your pantry items."
+        "NSPhotoLibraryUsageDescription": "PantryChef accesses your photos to analyze your pantry items.",
+        "NSMicrophoneUsageDescription": "PantryChef uses your microphone for hands-free voice commands while cooking."
+      },
+      "privacyManifests": {
+        "NSPrivacyAccessedAPITypes": [
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults",
+            "NSPrivacyAccessedAPITypeReasons": ["CA92.1"]
+          },
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryFileTimestamp",
+            "NSPrivacyAccessedAPITypeReasons": ["C617.1"]
+          },
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryDiskSpace",
+            "NSPrivacyAccessedAPITypeReasons": ["E174.1"]
+          }
+        ],
+        "NSPrivacyCollectedDataTypes": [
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeEmailAddress",
+            "NSPrivacyCollectedDataTypeLinked": true,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": ["NSPrivacyCollectedDataTypePurposeAppFunctionality"]
+          },
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeOtherUserContent",
+            "NSPrivacyCollectedDataTypeLinked": true,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": ["NSPrivacyCollectedDataTypePurposeAppFunctionality"]
+          }
+        ],
+        "NSPrivacyTracking": false
       }
     },
     "android": {
@@ -26,9 +60,11 @@
         "backgroundColor": "#ddffe2"
       },
       "package": "com.pantrychef.app",
+      "versionCode": 1,
+      "usesCleartextTraffic": false,
       "permissions": [
-        "CAMERA",
-        "READ_EXTERNAL_STORAGE"
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
       ]
     },
     "web": {
@@ -49,6 +85,12 @@
         "expo-image-picker",
         {
           "photosPermission": "Allow PantryChef to access your photos to analyze pantry items."
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow PantryChef to use your microphone for hands-free cooking mode."
         }
       ],
       [

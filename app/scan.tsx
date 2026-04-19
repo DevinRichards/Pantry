@@ -74,11 +74,11 @@ export default function ScanScreen() {
     setStep('review');
 
     try {
-      // Resize and compress for API (SDK 54 fluent API)
+      // Resize for API — keep quality high (0.92) so labels/text are readable
       const context = ImageManipulator.manipulate(uri);
-      const image = await context.resize({ width: 1024 }).renderAsync();
+      const image = await context.resize({ width: 1280 }).renderAsync();
       const manipulated = await image.saveAsync({
-        compress: 0.8,
+        compress: 0.92,
         format: SaveFormat.JPEG,
         base64: true,
       });

@@ -13,7 +13,7 @@ import {
   ActivityIndicator,
   Share,
 } from 'react-native';
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import Animated, {
   FadeIn,
@@ -185,6 +185,10 @@ export default function RecipeDetailScreen() {
   const [updatingPantry, setUpdatingPantry] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const cookingStepRef = useRef<number | null>(null);
+  // Forward refs so voice-event callbacks can call functions defined later in the component
+  const speakCurrentStepRef = useRef<(stepIndex: number) => Promise<void>>(async () => {});
+  const handleCookedItRef = useRef<() => Promise<void>>(async () => {});
+  const startListeningRef = useRef<() => Promise<void>>(async () => {});
 
   // Keep ref in sync with state so event handlers always see current step
   useEffect(() => {
@@ -198,28 +202,22 @@ export default function RecipeDetailScreen() {
     if (!transcript) return;
 
     const step = cookingStepRef.current;
-    if (step === null || !recipe) return;
-
-    const totalStepsRef = recipe.steps.length;
+    if (step === null) return;
 
     if (
       transcript.includes('next') ||
       transcript.includes('forward') ||
       transcript.includes('continue')
     ) {
-      if (step < totalStepsRef - 1) {
-        setCookingStep(step + 1);
-      }
+      setCookingStep((prev) => (prev !== null ? Math.min(prev + 1, 999) : prev));
     } else if (
       transcript.includes('previous') ||
       transcript.includes('back') ||
       transcript.includes('go back')
     ) {
-      if (step > 0) {
-        setCookingStep(step - 1);
-      }
+      setCookingStep((prev) => (prev !== null ? Math.max(prev - 1, 0) : prev));
     } else if (transcript.includes('repeat') || transcript.includes('again')) {
-      speakCurrentStep(step);
+      void speakCurrentStepRef.current(step);
     } else if (transcript.includes('stop') || transcript.includes('quiet') || transcript.includes('mute')) {
       void Speech.stop();
       setIsSpeaking(false);
@@ -229,19 +227,19 @@ export default function RecipeDetailScreen() {
       transcript.includes('cooked') ||
       transcript.includes('complete')
     ) {
-      void handleCookedIt();
+      void handleCookedItRef.current();
     } else if (transcript.includes('read') || transcript.includes('play')) {
-      speakCurrentStep(step);
+      void speakCurrentStepRef.current(step);
     }
 
     // Restart listening after processing a command
-    startListening();
+    void startListeningRef.current();
   });
 
   useSpeechRecognitionEvent('end', () => {
     // Auto-restart listening if cooking mode is active
     if (cookingStepRef.current !== null && isListening) {
-      startListening();
+      void startListeningRef.current();
     } else {
       setIsListening(false);
     }
@@ -297,7 +295,7 @@ export default function RecipeDetailScreen() {
 
   useEffect(() => {
     if (!recipe || cookingStep === null || !speechEnabled) return;
-    speakCurrentStep(cookingStep);
+    void speakCurrentStepRef.current(cookingStep);
   }, [cookingStep, speechEnabled, recipe]);
 
   const heroImage = useMemo(() => (recipe ? getRecipeImage(recipe) : ''), [recipe]);
@@ -307,7 +305,7 @@ export default function RecipeDetailScreen() {
 
     try {
       if (isSaved && savedId) {
-        await removeSavedRecipe(savedId);
+        await removeSavedRecipe(user.uid, savedId);
         setIsSaved(false);
         setSavedId(null);
       } else {
@@ -348,7 +346,7 @@ export default function RecipeDetailScreen() {
       if (!list) list = await createShoppingList(user.uid);
 
       for (const ing of missing) {
-        await addItemToList(list.id, list.items, {
+        await addItemToList(user.uid, list.id, list.items, {
           name: ing.name,
           quantity: ing.amount,
           category: 'Other',
@@ -426,7 +424,10 @@ export default function RecipeDetailScreen() {
     }
   };
 
-  const speakCurrentStep = async (stepIndex: number) => {
+  // Keep forward-ref in sync for voice event handlers
+  startListeningRef.current = startListening;
+
+  const speakCurrentStep = useCallback(async (stepIndex: number) => {
     if (!recipe) return;
 
     const narration = buildStepNarration(recipe, stepIndex);
@@ -446,7 +447,10 @@ export default function RecipeDetailScreen() {
     } catch {
       setIsSpeaking(false);
     }
-  };
+  }, [recipe]);
+
+  // Keep forward-refs in sync so voice event handlers (defined before these fns) stay current
+  useEffect(() => { speakCurrentStepRef.current = speakCurrentStep; }, [speakCurrentStep]);
 
   const handleStopSpeaking = async () => {
     try {
@@ -466,9 +470,9 @@ export default function RecipeDetailScreen() {
       const result = await updatePantryAfterCooking(user.uid, recipe);
 
       // Persist cooked record and any skipped ingredients for Needs Review
-      await markRecipeAsCooked(recipe.id, recipe.title, result.skippedIngredients);
+      await markRecipeAsCooked(user.uid, recipe.id, recipe.title, result.skippedIngredients);
       if (result.skippedIngredients.length > 0) {
-        await addNeedsReviewItems(recipe.id, recipe.title, result.skippedIngredients);
+        await addNeedsReviewItems(user.uid, recipe.id, recipe.title, result.skippedIngredients);
       }
 
       setCookingStep(null);
@@ -495,6 +499,9 @@ export default function RecipeDetailScreen() {
       setUpdatingPantry(false);
     }
   };
+
+  // Keep forward-ref in sync for voice event handlers
+  handleCookedItRef.current = handleCookedIt;
 
   if (!recipe) {
     return (

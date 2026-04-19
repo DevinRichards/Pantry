@@ -1,41 +1,61 @@
 import { useEffect } from 'react';
 import { Tabs, useRouter } from 'expo-router';
 import { View, StyleSheet, Text, Platform } from 'react-native';
-import { BlurView } from 'expo-blur';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
-  withSpring,
   withTiming,
 } from 'react-native-reanimated';
-import { Colors } from '@/constants/Colors';
+import {
+  PantryIcon,
+  RecipesIcon,
+  ShoppingIcon,
+  CookbookIcon,
+  ProfileIcon,
+} from '@/constants/TabIcons';
 import { useAuth } from '@/hooks/useAuth';
 
-function TabIcon({
-  focused,
-  icon,
-  label,
-}: {
-  focused: boolean;
-  icon: string;
-  label: string;
-}) {
-  const scale = useSharedValue(1);
-  const bgOpacity = useSharedValue(0);
+// Design tokens — matched to pantry-tokens.jsx forest theme
+const PRIMARY       = '#1B4332';
+const PRIMARY_LIGHT = '#D8F3DC';
+const TEXT_TER      = '#8FA899';
+const BORDER        = '#E4EBE6';
 
-  scale.value = withSpring(focused ? 1.12 : 1, { damping: 16, stiffness: 300 });
-  bgOpacity.value = withTiming(focused ? 1 : 0, { duration: 150 });
+type IconName = 'pantry' | 'recipes' | 'shopping' | 'cookbook' | 'profile';
 
+const ICONS: Record<IconName, (color: string) => React.ReactElement> = {
+  pantry:   c => <PantryIcon color={c} size={22} />,
+  recipes:  c => <RecipesIcon color={c} size={22} />,
+  shopping: c => <ShoppingIcon color={c} size={22} />,
+  cookbook: c => <CookbookIcon color={c} size={22} />,
+  profile:  c => <ProfileIcon color={c} size={22} />,
+};
+
+/**
+ * TabIcon — matches the TabBar component in pantry-shared.jsx exactly.
+ *
+ * Active state: 34×34, borderRadius:10 square container (primaryLight bg)
+ * around just the icon. Label below in primary color, weight 700.
+ * Inactive: transparent container, textTer color, weight 500.
+ */
+function TabIcon({ focused, icon, label }: { focused: boolean; icon: IconName; label: string }) {
+  const bgOpacity = useSharedValue(focused ? 1 : 0);
+  bgOpacity.value = withTiming(focused ? 1 : 0, { duration: 180 });
   const bgStyle = useAnimatedStyle(() => ({ opacity: bgOpacity.value }));
-  const iconStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: scale.value }],
-  }));
+
+  const iconColor = focused ? PRIMARY : TEXT_TER;
+  const Icon = ICONS[icon];
 
   return (
     <View style={styles.tabItem}>
-      <Animated.View style={[StyleSheet.absoluteFill, styles.tabItemActiveBg, bgStyle]} />
-      <Animated.Text style={iconStyle}>{icon}</Animated.Text>
-      <Text style={[styles.tabLabel, focused && styles.tabLabelActive]}>{label}</Text>
+      {/* 34×34 rounded-square icon container */}
+      <View style={styles.iconWrap}>
+        <Animated.View style={[StyleSheet.absoluteFill, styles.iconActiveBg, bgStyle]} />
+        {Icon(iconColor)}
+      </View>
+      <Text style={[styles.tabLabel, focused && styles.tabLabelActive]}>
+        {label}
+      </Text>
     </View>
   );
 }
@@ -45,9 +65,7 @@ export default function TabLayout() {
   const router = useRouter();
 
   useEffect(() => {
-    if (!loading && !user) {
-      router.replace('/(auth)/login');
-    }
+    if (!loading && !user) router.replace('/(auth)/login');
   }, [user, loading]);
 
   if (!user) return null;
@@ -59,60 +77,16 @@ export default function TabLayout() {
         tabBarShowLabel: false,
         tabBarStyle: styles.tabBar,
         tabBarIconStyle: styles.tabBarIcon,
-        tabBarBackground: () =>
-          Platform.OS === 'ios' ? (
-            <BlurView
-              intensity={80}
-              tint="systemChromeMaterial"
-              style={StyleSheet.absoluteFill}
-            />
-          ) : (
-            <View
-              style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(255,255,255,0.97)' }]}
-            />
-          ),
+        tabBarBackground: () => (
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(255,255,255,0.95)' }]} />
+        ),
       }}
     >
-      <Tabs.Screen
-        name="index"
-        options={{
-          tabBarIcon: ({ focused }) => (
-            <TabIcon focused={focused} icon="🥦" label="Pantry" />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="recipes"
-        options={{
-          tabBarIcon: ({ focused }) => (
-            <TabIcon focused={focused} icon="🍳" label="Recipes" />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="shopping"
-        options={{
-          tabBarIcon: ({ focused }) => (
-            <TabIcon focused={focused} icon="🛒" label="Shopping" />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="cookbook"
-        options={{
-          tabBarIcon: ({ focused }) => (
-            <TabIcon focused={focused} icon="📖" label="Cookbook" />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="profile"
-        options={{
-          tabBarIcon: ({ focused }) => (
-            <TabIcon focused={focused} icon="👤" label="Profile" />
-          ),
-        }}
-      />
+      <Tabs.Screen name="index"    options={{ tabBarIcon: ({ focused }) => <TabIcon focused={focused} icon="pantry"   label="Pantry"   /> }} />
+      <Tabs.Screen name="recipes"  options={{ tabBarIcon: ({ focused }) => <TabIcon focused={focused} icon="recipes"  label="Recipes"  /> }} />
+      <Tabs.Screen name="shopping" options={{ tabBarIcon: ({ focused }) => <TabIcon focused={focused} icon="shopping" label="Shopping" /> }} />
+      <Tabs.Screen name="cookbook" options={{ tabBarIcon: ({ focused }) => <TabIcon focused={focused} icon="cookbook" label="Cookbook" /> }} />
+      <Tabs.Screen name="profile"  options={{ tabBarIcon: ({ focused }) => <TabIcon focused={focused} icon="profile"  label="Profile"  /> }} />
     </Tabs>
   );
 }
@@ -120,46 +94,41 @@ export default function TabLayout() {
 const styles = StyleSheet.create({
   tabBar: {
     position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
+    bottom: 0, left: 0, right: 0,
     height: Platform.OS === 'ios' ? 84 : 68,
-    borderTopWidth: 0,
+    borderTopWidth: 1,
+    borderTopColor: BORDER,
     backgroundColor: 'transparent',
     elevation: 0,
-    shadowColor: Colors.onSurface,
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    overflow: 'hidden',
+    shadowOpacity: 0,
   },
-  // Makes the icon slot tall + full-width so our custom view fills it
-  tabBarIcon: {
-    width: '100%',
-    height: 50,
-  },
+  // Makes each icon slot fill the full tab width/height
+  tabBarIcon: { width: '100%', height: 56 },
+
+  // Outer tab column: icon container + label
   tabItem: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     gap: 3,
-    borderRadius: 14,
-    paddingVertical: 6,
-    paddingHorizontal: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 2,
   },
-  tabItemActiveBg: {
-    backgroundColor: Colors.surfaceContainerLow,
-    borderRadius: 14,
+
+  // 34×34 borderRadius:10 square — matches design exactly
+  iconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
   },
-  tabLabel: {
-    fontSize: 10,
-    fontWeight: '600',
-    color: Colors.onSurfaceVariant,
+  iconActiveBg: {
+    backgroundColor: PRIMARY_LIGHT,
+    borderRadius: 10,
   },
-  tabLabelActive: {
-    color: Colors.primary,
-    fontWeight: '700',
-  },
+
+  tabLabel: { fontSize: 10, fontWeight: '500', color: TEXT_TER },
+  tabLabelActive: { color: PRIMARY, fontWeight: '700' },
 });

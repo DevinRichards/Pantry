@@ -1,7 +1,7 @@
 # 🍃 PantryChef
 
-**AI-powered recipe suggestions from your fridge & pantry.**
-Built with React Native (Expo), Claude AI, and Firebase.
+**AI-powered recipe suggestions from your fridge & pantry.**  
+Built with React Native (Expo), Claude AI, Spoonacular, and Firebase.
 
 ---
 
@@ -9,14 +9,17 @@ Built with React Native (Expo), Claude AI, and Firebase.
 
 | Feature | Description |
 |---|---|
-| 📷 **Scan Ingredients** | Take a photo of your fridge/pantry — Claude Vision identifies every item |
-| 🤖 **AI Recipes** | Claude generates personalized recipes from your available ingredients |
-| ✅ **Full & Partial Match** | See what you can cook *right now* vs. what needs one or two extra items |
-| 🍳 **Cooking Mode** | Step-by-step fullscreen instructions with pro tips |
-| 📖 **Cookbook** | Save, rate, and comment on your favourite recipes |
-| 🛒 **Smart Shopping List** | Auto-fill missing ingredients from any recipe; group by supermarket category |
-| ↗️ **Share Recipes** | Share any recipe with friends via the native share sheet |
-| 🔖 **Pantry Database** | Track all your ingredients with quantity, category, and low-stock alerts |
+| 📷 **Fridge Scan** | Take a photo or pick from your library — Claude Vision identifies every ingredient automatically |
+| 🤖 **AI Recipe Generation** | Claude generates 3 recipes per session (2 full matches + 1 partial match needing 1–3 extra items) |
+| 🍳 **Hands-Free Cooking Mode** | Fullscreen step-by-step mode reads instructions aloud; say "next step", "repeat", or "done" to navigate |
+| 🎙️ **Voice Commands** | Microphone toggle during cooking; built on `expo-speech-recognition` (requires a dev or production build) |
+| 🥗 **Real Nutrition Data** | Recipes are enriched with calories, protein, carbs, fat, and a food photo via Spoonacular (AI fallback if unavailable) |
+| 🗒️ **Needs Review** | After cooking, ingredients that couldn't be auto-deducted surface in the Pantry tab for manual review |
+| 📖 **Cookbook** | Save, rate (1–5 stars), and comment on recipes; ratings sync across all devices via a Firestore transaction |
+| 🛒 **Shopping List** | Add missing ingredients with one tap; items are grouped by supermarket category |
+| 💾 **Recipe Cache** | Generated recipes persist across restarts via AsyncStorage; a stale-pantry warning appears if your pantry changes |
+| 👩‍🍳 **Chef's Tips** | Tap any pantry ingredient for a quick storage or preparation tip (Claude Haiku) |
+| 🔄 **Pantry Auto-Update** | Mark a recipe as cooked and PantryChef automatically deducts used ingredients |
 
 ---
 
@@ -25,9 +28,8 @@ Built with React Native (Expo), Claude AI, and Firebase.
 ### 1 — Prerequisites
 
 - [Node.js 18+](https://nodejs.org)
-- [Expo CLI](https://docs.expo.dev/get-started/installation/)
-  `npm install -g expo-cli`
-- [Expo Go](https://expo.dev/go) on your iOS or Android device
+- [Expo Go](https://expo.dev/go) on your iOS or Android device (for basic testing)
+- A development build via EAS is required for voice commands (`expo-speech-recognition` is a native module)
 
 ### 2 — Clone & Install
 
@@ -42,10 +44,12 @@ npm install
 2. Enable **Authentication** → Email/Password.
 3. Enable **Firestore Database** (start in test mode for development).
 4. Click the **</>** (Web) icon to register a web app and copy your config.
+5. Deploy the included Firestore and Storage rules before production use.
 
-### 4 — Set Up Claude API
+### 4 — Get API Keys
 
-1. Go to [console.anthropic.com](https://console.anthropic.com) and create an API key.
+- **Anthropic**: [console.anthropic.com](https://console.anthropic.com) — required behind a backend proxy for production.
+- **Spoonacular**: [spoonacular.com/food-api](https://spoonacular.com/food-api) — optional, and should also be proxied in production. Without it, nutrition data is AI-estimated and recipe images won't appear.
 
 ### 5 — Environment Variables
 
@@ -56,34 +60,33 @@ cp .env.example .env
 ```
 
 ```env
-# Anthropic
+# Anthropic proxy (required in production)
+EXPO_PUBLIC_ANTHROPIC_PROXY_URL=https://your-api.example.com/anthropic/messages
+
+# Anthropic direct key (development only)
 EXPO_PUBLIC_ANTHROPIC_API_KEY=sk-ant-...
 
-# Firebase
+# Firebase (all required)
 EXPO_PUBLIC_FIREBASE_API_KEY=AIza...
 EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
 EXPO_PUBLIC_FIREBASE_PROJECT_ID=your-project-id
 EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET=your-project.appspot.com
 EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=1234567890
 EXPO_PUBLIC_FIREBASE_APP_ID=1:123:web:abc123
+
+# Spoonacular proxy (recommended in production)
+EXPO_PUBLIC_SPOONACULAR_PROXY_BASE_URL=https://your-api.example.com/spoonacular
+
+# Spoonacular direct key (development only)
+EXPO_PUBLIC_SPOONACULAR_API_KEY=...
 ```
 
-> ⚠️ **Security note:** For production, move the Claude API calls to a Firebase Cloud Function or backend server so your API key is never exposed in the client app.
+> ⚠️ **Security note:** Production builds now require proxy endpoints for Anthropic, and should proxy Spoonacular as well, so third-party provider keys are never bundled in the client app.
 
-### 6 — Add Assets
-
-Place these images in `assets/images/`:
-- `icon.png` — 1024×1024 app icon
-- `splash.png` — 1242×2436 splash screen
-- `adaptive-icon.png` — 1024×1024 Android adaptive icon
-- `favicon.png` — 48×48 web favicon
-
-You can use any green-themed placeholder images for development.
-
-### 7 — Run the App
+### 6 — Run the App
 
 ```bash
-# Start the dev server
+# Start the dev server (Expo Go — no voice commands)
 npm start
 
 # Or target a specific platform
@@ -91,7 +94,7 @@ npm run ios
 npm run android
 ```
 
-Scan the QR code with Expo Go on your device.
+Scan the QR code with Expo Go on your device. Note: voice commands require a development build (see Building below).
 
 ---
 
@@ -99,34 +102,62 @@ Scan the QR code with Expo Go on your device.
 
 ```
 PantryChef/
-├── app/                        # Expo Router screens
-│   ├── _layout.tsx             # Root layout (StatusBar, Stack)
-│   ├── scan.tsx                # Camera scan screen
+├── app/                          # Expo Router screens
+│   ├── _layout.tsx               # Root layout (auth guard, StatusBar)
+│   ├── scan.tsx                  # Camera / photo-library scan screen
 │   ├── (auth)/
 │   │   ├── login.tsx
 │   │   └── register.tsx
 │   ├── (tabs)/
-│   │   ├── index.tsx           # Pantry screen
-│   │   ├── recipes.tsx         # Recipe discovery
-│   │   ├── cookbook.tsx        # Saved recipes
-│   │   ├── shopping.tsx        # Shopping list
-│   │   └── profile.tsx         # Profile & settings
+│   │   ├── _layout.tsx           # Tab bar config
+│   │   ├── index.tsx             # Pantry screen + Needs Review section
+│   │   ├── recipes.tsx           # AI recipe generation + cache
+│   │   ├── cookbook.tsx          # Saved recipes
+│   │   ├── shopping.tsx          # Shopping list (grouped by category)
+│   │   └── profile.tsx           # Profile & sign-out
 │   └── recipe/
-│       └── [id].tsx            # Recipe detail + cooking mode
+│       └── [id].tsx              # Recipe detail, cooking mode, voice control, ratings
 ├── constants/
-│   └── Colors.ts               # Full Material Design 3 green theme
+│   └── Colors.ts                 # Green Material Design 3 theme
 ├── hooks/
-│   ├── useAuth.ts
-│   └── usePantry.ts
+│   ├── useAuth.ts                # Firebase Auth state + login/register/logout
+│   └── usePantry.ts              # Firestore pantry CRUD with real-time listener
 ├── services/
-│   ├── claude.ts               # Claude Vision + Recipe generation
-│   ├── firebase.ts             # Firebase init
-│   ├── pantryService.ts        # Pantry CRUD (Firestore)
-│   ├── recipeService.ts        # Saved recipes + ratings
-│   └── shoppingService.ts      # Shopping list CRUD
-└── types/
-    └── index.ts                # All TypeScript interfaces
+│   ├── claude.ts                 # Claude API: detectIngredients, generateRecipes, generateChefTip
+│   ├── spoonacular.ts            # Spoonacular: recipe search, nutrition, HD images
+│   ├── recipeCache.ts            # AsyncStorage: recipe cache + pantry-hash staleness
+│   ├── cookedRecipes.ts          # AsyncStorage: cooked records + Needs Review items
+│   ├── firebase.ts               # Firebase v11 init (getAuth, Firestore)
+│   ├── pantryService.ts          # Firestore: pantry item CRUD
+│   ├── recipeService.ts          # Firestore: saved recipes + ratings (transaction-based)
+│   └── shoppingService.ts        # Firestore: shopping list CRUD
+├── types/
+│   └── index.ts                  # All TypeScript interfaces
+├── assets/
+│   └── images/                   # icon.png, splash.png, adaptive-icon.png, favicon.png
+├── store/
+│   ├── app-store-listing.md      # Apple App Store Connect copy (ready to paste)
+│   └── google-play-listing.md    # Google Play Console copy + Data Safety responses
+└── eas.json                      # EAS Build profiles (development, preview, production)
 ```
+
+---
+
+## 🤖 Claude AI Integration
+
+Three calls are made to the Anthropic API:
+
+**`detectIngredientsFromPhoto`** — uses `claude-opus-4-6` with vision to analyse a base64-encoded JPEG (captured at 1280px width, quality 0.92) and return a JSON list of detected ingredients with name, quantity, category, confidence, and Material Symbol icon name.
+
+**`generateRecipes`** — makes three sequential calls to `claude-opus-4-6`, each requesting one recipe (2 full matches, then 1 partial match needing ≤3 missing ingredients). Each call enforces variety by excluding prior recipe titles and cuisines. Recipes are normalised, then enriched with Spoonacular data in parallel. The full flow has a 45-second timeout per call.
+
+**`generateChefTip`** — uses `claude-haiku-4-5-20251001` to generate a short storage or preparation tip for a selected pantry ingredient. Lightweight and fast.
+
+---
+
+## 🥗 Spoonacular Integration
+
+After Claude generates a recipe, `enrichRecipeData` searches Spoonacular by recipe title and fetches full nutrition (calories, protein, carbs, fat, fiber, sugar, sodium) and a 636×393 food photo. If Spoonacular is unavailable or returns no match, the app silently falls back to Claude's estimated nutrition and no image. The free Spoonacular tier supports roughly 50 recipe lookups per day.
 
 ---
 
@@ -135,9 +166,11 @@ PantryChef/
 | Collection | Description |
 |---|---|
 | `pantryItems` | User's ingredients (`userId`, `name`, `quantity`, `category`, `addedAt`) |
-| `savedRecipes` | Cookbook entries (`userId`, `recipeId`, `recipe`, `userRating`, `notes`) |
-| `ratings` | Recipe ratings & comments (`recipeId`, `userId`, `rating`, `comment`) |
+| `savedRecipes` | Cookbook entries (`userId`, `recipeId`, `recipe`, `savedAt`) |
+| `ratings` | Recipe ratings & comments (`recipeId`, `userId`, `rating`, `comment`, `createdAt`) |
 | `shoppingLists` | Shopping lists with embedded items array |
+
+Ratings are written via a Firestore `runTransaction` that atomically upserts the rating document and back-propagates the new average and count to every `savedRecipes` document for that recipe, so the Cookbook always shows live data.
 
 **Recommended Firestore indexes:**
 - `pantryItems`: `userId ASC, addedAt DESC`
@@ -146,15 +179,13 @@ PantryChef/
 
 ---
 
-## 🤖 Claude AI Integration
+## 💾 Local AsyncStorage
 
-Two main calls are made to the Anthropic API:
+Two services persist data on-device:
 
-### Image → Ingredients (`detectIngredientsFromPhoto`)
-Uses **claude-opus-4-6** with vision to analyse a base64-encoded JPEG and return a structured JSON list of detected ingredients with categories and confidence scores.
+**`recipeCache.ts`** — stores the last generated recipe set along with the ISO timestamp and a pantry hash (sorted ingredient names joined with `|`). On the Recipes tab, if the current pantry hash differs from the cached hash, a stale-cache warning appears prompting regeneration.
 
-### Pantry → Recipes (`generateRecipes`)
-Uses **claude-opus-4-6** to generate 6 diverse recipes (2–3 full matches, 3–4 partial matches) with complete ingredients, step-by-step instructions, and nutrition info, formatted as JSON.
+**`cookedRecipes.ts`** — stores a rolling log of cooked recipe records (last 100) and a queue of "Needs Review" items (last 50): ingredients that couldn't be auto-deducted because their quantity was unknown. These surface in the Pantry tab until manually dismissed.
 
 ---
 
@@ -163,18 +194,31 @@ Uses **claude-opus-4-6** to generate 6 diverse recipes (2–3 full matches, 3–
 ```bash
 # Install EAS CLI
 npm install -g eas-cli
+eas login
 
-# Configure your project
-eas build:configure
+# Development build (includes native modules like voice recognition)
+eas build --platform ios --profile development
+eas build --platform android --profile development
 
-# Build for iOS
-eas build --platform ios
+# Preview build (signed, shareable via link — good for testers)
+eas build --platform android --profile preview   # produces APK
 
-# Build for Android
-eas build --platform android
+# Production build
+eas build --platform ios --profile production     # produces IPA for TestFlight
+eas build --platform android --profile production # produces AAB for Play Store
+
+# Submit
+eas submit --platform ios      # uploads to App Store Connect
+eas submit --platform android  # uploads to Play Store (internal track)
 ```
 
-See [Expo EAS docs](https://docs.expo.dev/build/introduction/) for full instructions.
+Before submitting, fill in the placeholder values in `eas.json`:
+- `appleId` — your Apple ID email
+- `ascAppId` — the numeric App Store Connect app ID
+- `appleTeamId` — your Apple Developer Team ID
+- `serviceAccountKeyPath` — path to your Google Play service account JSON
+
+See `store/app-store-listing.md` and `store/google-play-listing.md` for ready-to-paste store listing copy and submission checklists.
 
 ---
 
@@ -185,8 +229,6 @@ See [Expo EAS docs](https://docs.expo.dev/build/introduction/) for full instruct
 - [ ] Meal planning calendar
 - [ ] Nutritional goal tracking
 - [ ] Social features (follow friends, share cookbooks)
-- [ ] Offline recipe caching
-- [ ] Voice-guided cooking mode
 
 ---
 

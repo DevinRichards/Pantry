@@ -5,17 +5,19 @@
  *  - High-quality food photography
  *  - Verified recipe metadata
  *
- * API key is stored in EXPO_PUBLIC_SPOONACULAR_API_KEY.
- * Free tier: 150 points/day (~50 recipe lookups).
- * Docs: https://spoonacular.com/food-api/docs
+ * Security model:
+ * - Production should proxy requests via EXPO_PUBLIC_SPOONACULAR_PROXY_BASE_URL
+ * - Development may fall back to EXPO_PUBLIC_SPOONACULAR_API_KEY
  */
 
 import { NutritionalInfo } from '@/types';
+import { buildProxyHeaders, getDevOnlyPublicKey, getOptionalProxyUrl } from './secureApi';
 
 const BASE_URL = 'https://api.spoonacular.com';
+const SPOONACULAR_PROXY_BASE_URL = getOptionalProxyUrl(process.env.EXPO_PUBLIC_SPOONACULAR_PROXY_BASE_URL);
 
 function getApiKey(): string | null {
-  return process.env.EXPO_PUBLIC_SPOONACULAR_API_KEY ?? null;
+  return getDevOnlyPublicKey(process.env.EXPO_PUBLIC_SPOONACULAR_API_KEY);
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -75,6 +77,32 @@ function getNutrientNumber(
 
 // ─── API Calls ────────────────────────────────────────────────────────────────
 
+const FETCH_TIMEOUT_MS = 6000;
+
+/** Fetch with a hard timeout — Spoonacular can be slow on free tier */
+async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchSpoonacular(path: string): Promise<Response | null> {
+  if (SPOONACULAR_PROXY_BASE_URL) {
+    const headers = await buildProxyHeaders();
+    return fetchWithTimeout(`${SPOONACULAR_PROXY_BASE_URL}${path}`, { headers });
+  }
+
+  const apiKey = getApiKey();
+  if (!apiKey) return null;
+
+  const separator = path.includes('?') ? '&' : '?';
+  return fetchWithTimeout(`${BASE_URL}${path}${separator}apiKey=${encodeURIComponent(apiKey)}`);
+}
+
 /**
  * Search Spoonacular for a recipe by title.
  * Returns the best-matching result, or null if none found / API unavailable.
@@ -82,12 +110,11 @@ function getNutrientNumber(
 export async function searchRecipeByTitle(
   title: string
 ): Promise<SpoonacularSearchResult | null> {
-  const apiKey = getApiKey();
-  if (!apiKey) return null;
-
   try {
-    const url = `${BASE_URL}/recipes/complexSearch?query=${encodeURIComponent(title)}&number=1&apiKey=${apiKey}`;
-    const res = await fetch(url);
+    const res = await fetchSpoonacular(
+      `/recipes/complexSearch?query=${encodeURIComponent(title)}&number=1`
+    );
+    if (!res) return null;
 
     if (!res.ok) {
       console.warn(`Spoonacular search failed: ${res.status}`);
@@ -98,7 +125,11 @@ export async function searchRecipeByTitle(
     const results: SpoonacularSearchResult[] = data.results ?? [];
     return results.length > 0 ? results[0] : null;
   } catch (err) {
-    console.warn('Spoonacular search error:', err);
+    if (err instanceof Error && err.name === 'AbortError') {
+      console.warn('Spoonacular search timed out');
+    } else {
+      console.warn('Spoonacular search error:', err);
+    }
     return null;
   }
 }
@@ -109,12 +140,11 @@ export async function searchRecipeByTitle(
 export async function getRecipeNutrition(
   recipeId: number
 ): Promise<SpoonacularRecipeInfo | null> {
-  const apiKey = getApiKey();
-  if (!apiKey) return null;
-
   try {
-    const url = `${BASE_URL}/recipes/${recipeId}/information?includeNutrition=true&apiKey=${apiKey}`;
-    const res = await fetch(url);
+    const res = await fetchSpoonacular(
+      `/recipes/${recipeId}/information?includeNutrition=true`
+    );
+    if (!res) return null;
 
     if (!res.ok) {
       console.warn(`Spoonacular info failed: ${res.status}`);
@@ -123,7 +153,11 @@ export async function getRecipeNutrition(
 
     return (await res.json()) as SpoonacularRecipeInfo;
   } catch (err) {
-    console.warn('Spoonacular info error:', err);
+    if (err instanceof Error && err.name === 'AbortError') {
+      console.warn('Spoonacular info timed out');
+    } else {
+      console.warn('Spoonacular info error:', err);
+    }
     return null;
   }
 }

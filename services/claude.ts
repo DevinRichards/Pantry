@@ -3,24 +3,62 @@
  * Handles ingredient detection from photos and AI recipe generation.
  * Recipes are enriched with Spoonacular data (real nutrition + images) when available.
  *
- * NOTE: In production, these calls should be proxied through a backend server
- * to keep your API key secure. For development/demo purposes, the key is stored
- * in your .env file and prefixed with EXPO_PUBLIC_.
+ * Security model:
+ * - Production must use a backend proxy via EXPO_PUBLIC_ANTHROPIC_PROXY_URL
+ * - Development may fall back to a public EXPO_PUBLIC_ANTHROPIC_API_KEY
  */
 import { DetectedIngredient, GenerationProgress, PantryItem, Recipe, RecipeIngredient } from '@/types';
 import { enrichRecipeData } from './spoonacular';
+import { buildProxyHeaders, getDevOnlyPublicKey, getOptionalProxyUrl, requireSecureProxy } from './secureApi';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-opus-4-6';
+const API_TIMEOUT_MS = 45_000; // 45s — recipe gen can be slow
+const ANTHROPIC_PROXY_URL = getOptionalProxyUrl(process.env.EXPO_PUBLIC_ANTHROPIC_PROXY_URL);
 
-function getHeaders() {
-  const apiKey = process.env.EXPO_PUBLIC_ANTHROPIC_API_KEY ?? '';
-  if (!apiKey) throw new Error('Missing EXPO_PUBLIC_ANTHROPIC_API_KEY in environment.');
+async function getAnthropicRequest(): Promise<{
+  url: string;
+  headers: Record<string, string>;
+}> {
+  if (ANTHROPIC_PROXY_URL) {
+    return {
+      url: ANTHROPIC_PROXY_URL,
+      headers: await buildProxyHeaders(),
+    };
+  }
+
+  const apiKey = getDevOnlyPublicKey(process.env.EXPO_PUBLIC_ANTHROPIC_API_KEY);
+  if (!apiKey) {
+    requireSecureProxy('AI features');
+  }
+
   return {
-    'Content-Type': 'application/json',
-    'x-api-key': apiKey,
-    'anthropic-version': '2023-06-01',
+    url: ANTHROPIC_API_URL,
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
   };
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function postAnthropic(body: Record<string, unknown>): Promise<Response> {
+  const request = await getAnthropicRequest();
+  return fetchWithTimeout(request.url, {
+    method: 'POST',
+    headers: request.headers,
+    body: JSON.stringify(body),
+  });
 }
 
 // ─── Ingredient Detection from Photo ─────────────────────────────────────────
@@ -52,28 +90,23 @@ For the "icon" field, choose the best matching Material Symbols icon name (e.g.,
 
 Be thorough but only include items you can actually see or strongly infer from the image. Do not include items that are not visible.`;
 
-  const response = await fetch(ANTHROPIC_API_URL, {
-    method: 'POST',
-    headers: getHeaders(),
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 2000,
-      temperature: 0.2,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Image } },
-            { type: 'text', text: prompt },
-          ],
-        },
-      ],
-    }),
+  const response = await postAnthropic({
+    model: MODEL,
+    max_tokens: 2000,
+    temperature: 0.2,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Image } },
+          { type: 'text', text: prompt },
+        ],
+      },
+    ],
   });
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Claude API error: ${response.status} - ${error}`);
+    throw new Error('AI ingredient detection is temporarily unavailable.');
   }
 
   const data = await response.json();
@@ -82,7 +115,9 @@ Be thorough but only include items you can actually see or strongly infer from t
   const start = content.indexOf('[');
   const end = content.lastIndexOf(']');
   if (start === -1 || end === -1 || end <= start) {
-    console.log('Raw Claude ingredient response:', content);
+    if (__DEV__) {
+      console.warn('Claude ingredient response did not include JSON.');
+    }
     throw new Error('Could not parse ingredient list from AI response');
   }
 
@@ -274,20 +309,15 @@ async function generateSingleRecipe(
 ): Promise<Recipe> {
   const prompt = buildSingleRecipePrompt(pantryItems, preferences, options);
 
-  const response = await fetch(ANTHROPIC_API_URL, {
-    method: 'POST',
-    headers: getHeaders(),
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 1400,
-      temperature: 0.2,
-      messages: [{ role: 'user', content: prompt }],
-    }),
+  const response = await postAnthropic({
+    model: MODEL,
+    max_tokens: 1400,
+    temperature: 0.2,
+    messages: [{ role: 'user', content: prompt }],
   });
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Claude API error: ${response.status} - ${error}`);
+    throw new Error('Recipe generation is temporarily unavailable.');
   }
 
   const data = await response.json();
@@ -315,7 +345,9 @@ async function generateSingleRecipeWithRetry(
       return await generateSingleRecipe(pantryItems, preferences, options, recipeNumber);
     } catch (error) {
       lastError = error;
-      console.log(`Recipe ${recipeNumber} attempt ${attempt} failed:`, error);
+      if (__DEV__) {
+        console.warn(`Recipe ${recipeNumber} attempt ${attempt} failed.`);
+      }
     }
   }
   throw lastError instanceof Error ? lastError : new Error(`Failed to generate recipe ${recipeNumber}.`);
@@ -357,37 +389,41 @@ export async function generateRecipes(
   }
 
   const recipes: Recipe[] = [];
+  const enrichmentTasks: Promise<Recipe>[] = [];
 
   // ── Recipe 1: Full match ──
-  onProgress?.({ step: 'Generating recipe 1 of 3…', current: 0, total: 3 });
+  onProgress?.({ step: 'Generating recipe 1 of 3…', current: 0, total: 4 });
   const recipe1 = await generateSingleRecipeWithRetry(pantryItems, preferences, {
     matchType: 'full',
     excludeTitles: [],
     excludeCuisines: [],
   }, 1);
   recipes.push(recipe1);
+  enrichmentTasks.push(enrichWithSpoonacular(recipe1));
 
   // ── Recipe 2: Full match (variety) ──
-  onProgress?.({ step: 'Generating recipe 2 of 3…', current: 1, total: 3 });
+  onProgress?.({ step: 'Generating recipe 2 of 3…', current: 1, total: 4 });
   const recipe2 = await generateSingleRecipeWithRetry(pantryItems, preferences, {
     matchType: 'full',
     excludeTitles: recipes.map((r) => r.title),
     excludeCuisines: recipes.map((r) => r.cuisine ?? ''),
   }, 2);
   recipes.push(recipe2);
+  enrichmentTasks.push(enrichWithSpoonacular(recipe2));
 
   // ── Recipe 3: Partial match ──
-  onProgress?.({ step: 'Generating recipe 3 of 3…', current: 2, total: 3 });
+  onProgress?.({ step: 'Generating recipe 3 of 3…', current: 2, total: 4 });
   const recipe3 = await generateSingleRecipeWithRetry(pantryItems, preferences, {
     matchType: 'partial',
     excludeTitles: recipes.map((r) => r.title),
     excludeCuisines: recipes.map((r) => r.cuisine ?? ''),
   }, 3);
   recipes.push(recipe3);
+  enrichmentTasks.push(enrichWithSpoonacular(recipe3));
 
   // ── Enrich all recipes with Spoonacular (image + real nutrition) ──
-  onProgress?.({ step: 'Enriching with nutrition data…', current: 2, total: 3 });
-  const enriched = await Promise.all(recipes.map(enrichWithSpoonacular));
+  onProgress?.({ step: 'Adding nutrition data…', current: 3, total: 4 });
+  const enriched = await Promise.all(enrichmentTasks);
 
   return enriched;
 }
@@ -430,18 +466,14 @@ function categorizeIngredient(name: string): string {
 // ─── Chef's Tip Generation ────────────────────────────────────────────────────
 
 export async function generateChefTip(ingredient: string): Promise<string> {
-  const response = await fetch(ANTHROPIC_API_URL, {
-    method: 'POST',
-    headers: getHeaders(),
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 200,
-      temperature: 0.2,
-      messages: [{
-        role: 'user',
-        content: `Give me one practical chef's tip about storing or using ${ingredient}. Keep it under 40 words. Be specific and useful. No intro, just the tip.`,
-      }],
-    }),
+  const response = await postAnthropic({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 200,
+    temperature: 0.2,
+    messages: [{
+      role: 'user',
+      content: `Give me one practical chef's tip about storing or using ${ingredient}. Keep it under 40 words. Be specific and useful. No intro, just the tip.`,
+    }],
   });
 
   if (!response.ok) return '';

@@ -4,583 +4,563 @@ import {
   ScrollView,
   TouchableOpacity,
   StyleSheet,
-  SafeAreaView,
-  Alert,
-  Pressable,
   Image,
-  BackHandler,
+  Alert,
 } from 'react-native';
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { useRouter, useFocusEffect } from 'expo-router';
-import Animated, {
-  FadeInDown,
-  FadeIn,
-  ZoomIn,
-  useSharedValue,
-  useAnimatedStyle,
-  withSpring,
-  withTiming,
-  withRepeat,
-  withSequence,
-} from 'react-native-reanimated';
-import { Colors } from '@/constants/Colors';
-import { GenerationProgress, Recipe } from '@/types';
-import { generateRecipes } from '@/services/claude';
-import { usePantry } from '@/hooks/usePantry';
+import Animated, { FadeIn } from 'react-native-reanimated';
+import Svg, { Path, Circle, Polyline } from 'react-native-svg';
 import { useAuth } from '@/hooks/useAuth';
-import { saveRecipe } from '@/services/recipeService';
-import { getCookedRecipeIds } from '@/services/cookedRecipes';
+import { usePantry } from '@/hooks/usePantry';
+import { generateRecipes } from '@/services/recipes';
+import {
+  buildPantryHash,
+  cacheRecipes,
+  getCachedRecipes,
+  timeAgo,
+} from '@/services/recipeCache';
+import type { Recipe } from '@/types';
 
-const RECIPE_IMAGES: Record<string, string> = {
-  default: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600',
-  pasta: 'https://images.unsplash.com/photo-1621996346565-e3dbc646d9a9?w=600',
-  salmon: 'https://images.unsplash.com/photo-1467003909585-2f8a72700288?w=600',
-  salad: 'https://images.unsplash.com/photo-1512621776951-a57141f2eefd?w=600',
-};
+// ─── Design tokens ─────────────────────────────────────────────────────────────
+const C = {
+  bg:           '#F3F5F2',
+  surface:      '#FFFFFF',
+  text:         '#111916',
+  textSec:      '#4A5E54',
+  textTer:      '#8FA899',
+  border:       '#E4EBE6',
+  primary:      '#1B4332',
+  primaryMid:   '#52796F',
+  primaryLight: '#D8F3DC',
+  amber:        '#B45309',
+  amberLight:   '#FEF3C7',
+} as const;
 
-function getRecipeImage(recipe: Recipe): string {
-  if (recipe.imageUrl) return recipe.imageUrl;
-  const title = recipe.title.toLowerCase();
-  if (title.includes('pasta') || title.includes('risotto')) return RECIPE_IMAGES.pasta;
-  if (title.includes('salmon') || title.includes('fish')) return RECIPE_IMAGES.salmon;
-  if (title.includes('salad')) return RECIPE_IMAGES.salad;
-  return RECIPE_IMAGES.default;
+// ─── Icons ────────────────────────────────────────────────────────────────────
+function SparkleIcon({ color = '#1B4332', size = 24 }: { color?: string; size?: number }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path d="M12 2L13.8 9.2L21 12L13.8 14.8L12 22L10.2 14.8L3 12L10.2 9.2L12 2Z"
+        stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+      <Circle cx="19" cy="5" r="1.5" stroke={color} strokeWidth="1.2" />
+      <Circle cx="5" cy="19" r="1" stroke={color} strokeWidth="1.2" />
+    </Svg>
+  );
 }
 
-// ─── Progress Indicator ───────────────────────────────────────────────────────
-
-function GenerationProgressCard({ progress }: { progress: GenerationProgress }) {
-  const dotScale1 = useSharedValue(1);
-  const dotScale2 = useSharedValue(1);
-  const dotScale3 = useSharedValue(1);
-
-  useEffect(() => {
-    dotScale1.value = withRepeat(withSequence(withSpring(1.4), withSpring(1)), -1);
-    setTimeout(() => {
-      dotScale2.value = withRepeat(withSequence(withSpring(1.4), withSpring(1)), -1);
-    }, 200);
-    setTimeout(() => {
-      dotScale3.value = withRepeat(withSequence(withSpring(1.4), withSpring(1)), -1);
-    }, 400);
-  }, []);
-
-  const pct = Math.round(((progress.current + 1) / progress.total) * 100);
-
+function CheckIcon({ color = 'white', size = 9 }: { color?: string; size?: number }) {
   return (
-    <Animated.View entering={FadeIn} style={styles.progressCard}>
-      <View style={styles.progressCardHeader}>
-        <Text style={styles.progressEmoji}>🤖</Text>
-        <View style={styles.progressDots}>
-          {[dotScale1, dotScale2, dotScale3].map((scale, i) => {
-            const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
-            return <Animated.View key={i} style={[styles.dot, animStyle]} />;
+    <Svg width={size} height={size} viewBox="0 0 12 12" fill="none">
+      <Polyline points="2,6 5,9 10,3" stroke={color} strokeWidth="1.8"
+        strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
+  );
+}
+
+function ChevronRightIcon({ color = '#8FA899', size = 14 }: { color?: string; size?: number }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 14 14" fill="none">
+      <Polyline points="5,3 9,7 5,11" stroke={color} strokeWidth="1.5"
+        strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
+  );
+}
+
+// ─── Stat Cards ───────────────────────────────────────────────────────────────
+function StatCards({ stats }: { stats: Array<{ n: number | string; label: string }> }) {
+  return (
+    <View style={styles.statRow}>
+      {stats.map(({ n, label }) => (
+        <View key={label} style={styles.statCard}>
+          <Text style={styles.statN}>{n}</Text>
+          <Text style={styles.statLabel}>{label}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// ─── Loading State ────────────────────────────────────────────────────────────
+function LoadingScreen({ progress, progLabel }: { progress: number; progLabel: string }) {
+  const steps = ['Pantry', 'Full Match', 'Near Match', 'Nutrition'];
+  return (
+    <Animated.View entering={FadeIn} style={styles.loadingWrap}>
+      <View style={styles.sparkleBubble}>
+        <SparkleIcon color={C.primary} size={32} />
+      </View>
+      <Text style={styles.loadingTitle}>Generating Recipes</Text>
+      <Text style={styles.loadingLabel}>{progLabel}</Text>
+      <View style={{ width: '100%', maxWidth: 280 }}>
+        <View style={styles.progressTrack}>
+          <View style={[styles.progressFill, { width: `${progress}%` as `${number}%` }]} />
+        </View>
+        <View style={styles.stepsRow}>
+          {steps.map((l, i) => {
+            const done = progress >= ((i + 1) / 4) * 100;
+            return (
+              <View key={l} style={styles.stepItem}>
+                <View style={[styles.stepDot, done && styles.stepDotDone]}>
+                  {done && <CheckIcon size={9} />}
+                </View>
+                <Text style={styles.stepLabel}>{l}</Text>
+              </View>
+            );
           })}
         </View>
       </View>
-
-      <Text style={styles.progressTitle}>{progress.step}</Text>
-
-      <View style={styles.progressBarTrack}>
-        <Animated.View style={[styles.progressBarFill, { width: `${pct}%` as any }]} />
-      </View>
-
-      <View style={styles.progressSteps}>
-        {['Recipe 1', 'Recipe 2', 'Recipe 3', 'Nutrition'].map((label, i) => (
-          <View key={i} style={styles.progressStep}>
-            <View style={[
-              styles.progressStepDot,
-              i < progress.current + 1 && styles.progressStepDotDone,
-              i === progress.current && styles.progressStepDotActive,
-            ]}>
-              {i < progress.current && <Text style={styles.progressStepCheck}>✓</Text>}
-            </View>
-            <Text style={[
-              styles.progressStepLabel,
-              i === progress.current && styles.progressStepLabelActive,
-            ]}>{label}</Text>
-          </View>
-        ))}
-      </View>
     </Animated.View>
   );
 }
 
-// ─── Featured Card ────────────────────────────────────────────────────────────
-
-function FeaturedRecipeCard({
-  recipe, onPress, onSave, index = 0,
-}: { recipe: Recipe; onPress: () => void; onSave: () => void; index?: number }) {
-  const scale = useSharedValue(1);
-  const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
-
+// ─── Pre-generate State ────────────────────────────────────────────────────────
+function PreGenerateScreen({ pantryCount, onGenerate }: { pantryCount: number; onGenerate: () => void }) {
   return (
-    <Animated.View entering={FadeInDown.delay(index * 80).springify().damping(16)} style={animStyle}>
-      <Pressable
-        onPressIn={() => { scale.value = withSpring(0.97, { damping: 20 }); }}
-        onPressOut={() => { scale.value = withSpring(1, { damping: 20 }); }}
-        onPress={onPress}
-        style={styles.featuredCard}
-      >
-        <Image source={{ uri: getRecipeImage(recipe) }} style={styles.featuredImage} />
-        <View style={styles.featuredOverlay} />
-        <View style={styles.featuredContent}>
-          <View style={styles.featuredBadges}>
-            <View style={styles.matchBadgeFull}>
-              <Text style={styles.matchBadgeText}>✅ Can Make Now</Text>
-            </View>
-            {recipe.cuisine && (
-              <View style={styles.cuisineBadge}>
-                <Text style={styles.cuisineBadgeText}>{recipe.cuisine}</Text>
-              </View>
-            )}
+    <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}
+      contentContainerStyle={{ paddingBottom: 120 }}>
+      <View style={styles.screenHeader}>
+        <Text style={styles.eyebrow}>AI-Powered</Text>
+        <Text style={styles.heroTitle}>Recipes</Text>
+      </View>
+      <View style={{ paddingHorizontal: 20 }}>
+        <StatCards stats={[
+          { n: pantryCount, label: 'Pantry items' },
+          { n: '—', label: 'Ready now' },
+          { n: '—', label: 'Near matches' },
+        ]} />
+        <View style={styles.generateCard}>
+          <View style={styles.sparkleBubble}>
+            <SparkleIcon color={C.primary} size={32} />
           </View>
-          <Text style={styles.featuredTitle}>{recipe.title}</Text>
-          <View style={styles.featuredMeta}>
-            <Text style={styles.featuredMetaText}>⏱ {recipe.totalTime} min</Text>
-            <Text style={styles.featuredMetaDot}>·</Text>
-            <Text style={styles.featuredMetaText}>📊 {recipe.difficulty}</Text>
-            {recipe.nutrition?.calories ? (
-              <>
-                <Text style={styles.featuredMetaDot}>·</Text>
-                <Text style={styles.featuredMetaText}>
-                  🔥 {recipe.nutrition.calories} kcal
-                  {recipe.nutrition.dataSource === 'spoonacular' ? ' ✓' : ''}
-                </Text>
-              </>
-            ) : null}
-          </View>
-          <View style={styles.featuredActions}>
-            <TouchableOpacity style={styles.cookNowBtn} onPress={onPress}>
-              <Text style={styles.cookNowText}>Start Cooking →</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.saveBtn} onPress={onSave}>
-              <Text style={styles.saveBtnText}>🔖</Text>
-            </TouchableOpacity>
-          </View>
+          <Text style={styles.generateTitle}>Claude AI Recipe Discovery</Text>
+          <Text style={styles.generateDesc}>
+            Analyses your {pantryCount} pantry items and finds the best recipes — with real nutrition data.
+          </Text>
+          <TouchableOpacity style={styles.generateBtn} onPress={onGenerate} activeOpacity={0.85}>
+            <SparkleIcon color="white" size={16} />
+            <Text style={styles.generateBtnText}>Generate Recipes</Text>
+          </TouchableOpacity>
         </View>
-      </Pressable>
-    </Animated.View>
+      </View>
+    </ScrollView>
   );
 }
 
-// ─── Standard Card ────────────────────────────────────────────────────────────
-
-function RecipeCard({
-  recipe, onPress, onSave, index = 0,
-}: { recipe: Recipe; onPress: () => void; onSave: () => void; index?: number }) {
-  const scale = useSharedValue(1);
-  const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+// ─── Generated State ──────────────────────────────────────────────────────────
+function GeneratedScreen({
+  recipes, pantryCount, onGenerate, onRecipePress, cacheLabel, isStale,
+}: {
+  recipes: Recipe[];
+  pantryCount: number;
+  onGenerate: () => void;
+  onRecipePress: (recipe: Recipe) => void;
+  cacheLabel?: string | null;
+  isStale?: boolean;
+}) {
+  const full    = recipes.filter(r => !r.missingIngredients?.length);
+  const partial = recipes.filter(r => r.missingIngredients && r.missingIngredients.length > 0);
 
   return (
-    <Animated.View
-      entering={FadeInDown.delay(index * 70).springify().damping(16)}
-      style={[styles.recipeCard, animStyle]}
-    >
-      <Pressable
-        onPressIn={() => { scale.value = withSpring(0.97, { damping: 20 }); }}
-        onPressOut={() => { scale.value = withSpring(1, { damping: 20 }); }}
-        onPress={onPress}
-      >
-        <Image source={{ uri: getRecipeImage(recipe) }} style={styles.cardImage} />
-        <TouchableOpacity style={styles.cardBookmark} onPress={onSave}>
-          <Text style={styles.cardBookmarkIcon}>🔖</Text>
-        </TouchableOpacity>
-        <View style={styles.cardBody}>
-          <Text style={styles.cardTitle} numberOfLines={2}>{recipe.title}</Text>
-          <View style={styles.cardMeta}>
-            <Text style={styles.cardMetaText}>⏱ {recipe.totalTime}m</Text>
-            <Text style={styles.cardMetaDot}>·</Text>
-            <Text style={styles.cardMetaText}>{recipe.difficulty}</Text>
-            {recipe.nutrition?.calories ? (
-              <>
-                <Text style={styles.cardMetaDot}>·</Text>
-                <Text style={styles.cardMetaText}>
-                  🔥 {recipe.nutrition.calories}
-                  {recipe.nutrition.dataSource === 'spoonacular' ? '✓' : ''}
-                </Text>
-              </>
-            ) : null}
+    <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}
+      contentContainerStyle={{ paddingBottom: 120 }}>
+      {/* Header */}
+      <View style={[styles.screenHeader, { paddingBottom: 18 }]}>
+        <Text style={styles.eyebrow}>AI-Powered</Text>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text style={styles.heroTitle}>Recipes</Text>
+          <TouchableOpacity style={styles.refreshBtn} onPress={onGenerate} activeOpacity={0.8}>
+            <Text style={styles.refreshBtnText}>↺ Refresh</Text>
+          </TouchableOpacity>
+        </View>
+        <StatCards stats={[
+          { n: pantryCount, label: 'Pantry items' },
+          { n: full.length, label: 'Ready now' },
+          { n: partial.length, label: 'Near matches' },
+        ]} />
+      </View>
+
+      <View style={{ paddingHorizontal: 20 }}>
+        {cacheLabel ? (
+          <View style={[styles.cacheBanner, isStale && styles.cacheBannerStale]}>
+            <Text style={[styles.cacheBannerText, isStale && styles.cacheBannerTextStale]}>
+              {isStale ? `Showing cached recipes from ${cacheLabel}. Refresh for your latest pantry.` : `Loaded cached recipes from ${cacheLabel}.`}
+            </Text>
           </View>
-          {recipe.missingIngredients.length > 0 && (
-            <View style={styles.missingSection}>
-              <Text style={styles.missingLabel}>NEED</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                <View style={styles.missingChips}>
-                  {recipe.missingIngredients.slice(0, 3).map((ing) => (
-                    <View key={ing} style={styles.missingChip}>
-                      <Text style={styles.missingChipText}>{ing}</Text>
+        ) : null}
+
+        {/* Ready to Cook */}
+        {full.length > 0 && (
+          <>
+            <View style={styles.sectionTitleRow}>
+              <Text style={styles.sectionTitle}>Ready to Cook</Text>
+              <Text style={styles.sectionCount}>{full.length} recipes</Text>
+            </View>
+
+            {/* Hero card — 240px */}
+            <TouchableOpacity style={styles.heroCard} onPress={() => onRecipePress(full[0])} activeOpacity={0.9}>
+              {full[0].imageUrl ? (
+                <Image source={{ uri: full[0].imageUrl }}
+                  style={StyleSheet.absoluteFillObject} resizeMode="cover" />
+              ) : (
+                <View style={[StyleSheet.absoluteFillObject, { backgroundColor: C.primaryMid }]} />
+              )}
+              <View style={[StyleSheet.absoluteFillObject, { backgroundColor: 'rgba(8,20,12,0.65)' }]} />
+              <View style={styles.heroCardContent}>
+                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 10 }}>
+                  <View style={styles.fullMatchBadge}>
+                    <Text style={styles.fullMatchBadgeText}>Full Match</Text>
+                  </View>
+                  {full[0].cuisine ? (
+                    <View style={styles.cuisineBadge}>
+                      <Text style={styles.cuisineBadgeText}>{full[0].cuisine}</Text>
                     </View>
-                  ))}
-                  {recipe.missingIngredients.length > 3 && (
-                    <View style={[styles.missingChip, styles.missingChipMore]}>
-                      <Text style={styles.missingChipText}>+{recipe.missingIngredients.length - 3}</Text>
+                  ) : null}
+                </View>
+                <Text style={styles.heroCardTitle}>{full[0].title}</Text>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Text style={styles.heroCardMeta}>
+                    {[full[0].cookTime ? `${full[0].cookTime} min` : null,
+                      full[0].difficulty, full[0].nutrition?.calories ? `${full[0].nutrition?.calories} kcal` : null]
+                      .filter(Boolean).join(' · ')}
+                  </Text>
+                  <View style={styles.cookBtn}>
+                    <Text style={styles.cookBtnText}>Cook →</Text>
+                  </View>
+                </View>
+              </View>
+            </TouchableOpacity>
+
+            {/* 2nd full match — horizontal 88px */}
+            {full[1] && (
+              <TouchableOpacity style={styles.horizCard} onPress={() => onRecipePress(full[1])} activeOpacity={0.9}>
+                {full[1].imageUrl ? (
+                  <Image source={{ uri: full[1].imageUrl }} style={styles.horizCardImage} resizeMode="cover" />
+                ) : (
+                  <View style={[styles.horizCardImage, { backgroundColor: C.primaryMid }]} />
+                )}
+                <View style={styles.horizCardBody}>
+                  <Text style={styles.horizCardTitle} numberOfLines={2}>{full[1].title}</Text>
+                  <Text style={styles.horizCardMeta}>
+                    {[full[1].cookTime ? `${full[1].cookTime} min` : null, full[1].difficulty, full[1].cuisine]
+                      .filter(Boolean).join(' · ')}
+                  </Text>
+                </View>
+                <View style={{ alignItems: 'center', justifyContent: 'center', paddingRight: 14 }}>
+                  <ChevronRightIcon color={C.textTer} />
+                </View>
+              </TouchableOpacity>
+            )}
+          </>
+        )}
+
+        {/* Worth the Trip — partial matches */}
+        {partial.length > 0 && (
+          <>
+            <View style={styles.sectionTitleRow}>
+              <Text style={styles.sectionTitle}>Worth the Trip</Text>
+              <Text style={styles.sectionCount}>{partial.length} recipes</Text>
+            </View>
+            {partial.map(r => (
+              <TouchableOpacity key={r.id} style={styles.partialCard}
+                onPress={() => onRecipePress(r)} activeOpacity={0.9}>
+                {r.imageUrl ? (
+                  <Image source={{ uri: r.imageUrl }} style={styles.partialCardImage} resizeMode="cover" />
+                ) : (
+                  <View style={[styles.partialCardImage, { backgroundColor: C.primaryMid }]} />
+                )}
+                <View style={styles.partialCardBody}>
+                  <View>
+                    <Text style={styles.partialCardTitle} numberOfLines={2}>{r.title}</Text>
+                    <Text style={styles.partialCardMeta}>
+                      {[r.cookTime ? `${r.cookTime} min` : null, r.difficulty].filter(Boolean).join(' · ')}
+                    </Text>
+                  </View>
+                  {r.missingIngredients && r.missingIngredients.length > 0 && (
+                    <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+                      {r.missingIngredients.slice(0, 2).map(m => (
+                        <View key={m} style={styles.missingBadge}>
+                          <Text style={styles.missingBadgeText}>{m}</Text>
+                        </View>
+                      ))}
                     </View>
                   )}
                 </View>
-              </ScrollView>
-            </View>
-          )}
-        </View>
-      </Pressable>
-    </Animated.View>
-  );
-}
-
-// ─── Main Screen ──────────────────────────────────────────────────────────────
-
-export default function RecipesScreen() {
-  const { user } = useAuth();
-  const { items: pantryItems, loading: pantryLoading } = usePantry(user?.uid ?? null);
-  const router = useRouter();
-
-  const [recipes, setRecipes] = useState<Recipe[]>([]);
-  const [generating, setGenerating] = useState(false);
-  const [generated, setGenerated] = useState(false);
-  const [progress, setProgress] = useState<GenerationProgress | null>(null);
-  const [cookedIds, setCookedIds] = useState<Set<string>>(new Set());
-
-  // Load cooked IDs on focus so filtered list stays up to date
-  useFocusEffect(useCallback(() => {
-    getCookedRecipeIds().then(setCookedIds);
-  }, []));
-
-  // Filter out cooked recipes from the active list
-  const activeRecipes = recipes.filter((r) => !cookedIds.has(r.id));
-  const fullMatch = activeRecipes.filter((r) => r.matchType === 'full');
-  const partialMatch = activeRecipes.filter((r) => r.matchType === 'partial');
-  const cookedCount = recipes.length - activeRecipes.length;
-
-  const generateBtnScale = useSharedValue(1);
-  const generateBtnStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: generateBtnScale.value }],
-  }));
-
-  const handleGenerate = useCallback(async () => {
-    if (pantryItems.length === 0) {
-      Alert.alert(
-        'Empty Pantry',
-        'Add some ingredients to your pantry first.',
-        [{ text: 'Go to Pantry', onPress: () => router.push('/(tabs)') }, { text: 'Cancel' }]
-      );
-      return;
-    }
-    setGenerating(true);
-    setProgress(null);
-    try {
-      const result = await generateRecipes(pantryItems, {
-        onProgress: (p) => setProgress(p),
-      });
-      setRecipes(result);
-      setGenerated(true);
-    } catch (err: unknown) {
-      Alert.alert('Generation Failed', err instanceof Error ? err.message : 'Please try again.');
-    } finally {
-      setGenerating(false);
-      setProgress(null);
-    }
-  }, [pantryItems]);
-
-  const handleSave = async (recipe: Recipe) => {
-    if (!user) return;
-    try {
-      await saveRecipe(user.uid, recipe);
-      Alert.alert('Saved! 🎉', `"${recipe.title}" added to your cookbook.`);
-    } catch {
-      Alert.alert('Error', 'Could not save recipe. Please try again.');
-    }
-  };
-
-  const handleRecipePress = (recipe: Recipe) => {
-    router.push({ pathname: '/recipe/[id]', params: { id: recipe.id, recipe: JSON.stringify(recipe) } });
-  };
-
-  return (
-    <SafeAreaView style={styles.safeArea}>
-      {/* ── Header ── */}
-      <Animated.View entering={FadeIn.duration(400)} style={styles.header}>
-        <View style={styles.headerLeft}>
-          <Text style={styles.headerLogo}>🍃</Text>
-          <Text style={styles.headerTitle}>PantryChef</Text>
-        </View>
-        {generated && !generating && (
-          <TouchableOpacity style={styles.refreshChip} onPress={handleGenerate}>
-            <Text style={styles.refreshChipText}>🔄 Refresh</Text>
-          </TouchableOpacity>
-        )}
-      </Animated.View>
-
-      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
-        {/* ── Hero ── */}
-        <Animated.View entering={FadeInDown.delay(50).springify()} style={styles.heroSection}>
-          <Text style={styles.heroLabel}>AI-POWERED</Text>
-          <Text style={styles.heroTitle}>Recipe Ideas</Text>
-          <Text style={styles.heroSub}>
-            {generated
-              ? `${activeRecipes.length} recipe${activeRecipes.length !== 1 ? 's' : ''} ready${cookedCount > 0 ? ` · ${cookedCount} cooked` : ''}`
-              : 'Let Claude discover what you can cook right now.'}
-          </Text>
-        </Animated.View>
-
-        {/* ── Stats Bar ── */}
-        {pantryItems.length > 0 && (
-          <Animated.View entering={FadeInDown.delay(100).springify()} style={styles.statsBar}>
-            <View style={styles.statItem}>
-              <Text style={styles.statNum}>{pantryItems.length}</Text>
-              <Text style={styles.statLabel}>Pantry Items</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statItem}>
-              <Text style={styles.statNum}>{generated ? fullMatch.length : '?'}</Text>
-              <Text style={styles.statLabel}>Full Matches</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statItem}>
-              <Text style={styles.statNum}>{generated ? partialMatch.length : '?'}</Text>
-              <Text style={styles.statLabel}>Near Matches</Text>
-            </View>
-            {cookedCount > 0 && (
-              <>
-                <View style={styles.statDivider} />
-                <View style={styles.statItem}>
-                  <Text style={[styles.statNum, { color: Colors.secondary }]}>{cookedCount}</Text>
-                  <Text style={styles.statLabel}>Cooked</Text>
-                </View>
-              </>
-            )}
-          </Animated.View>
+              </TouchableOpacity>
+            ))}
+          </>
         )}
 
-        {/* ── Generate Card ── */}
-        {!generated && !generating && (
-          <Animated.View entering={FadeInDown.delay(150).springify()} style={styles.generateSection}>
-            <View style={styles.generateCard}>
-              <View style={styles.generateIconWrap}>
-                <Text style={styles.generateEmoji}>🤖</Text>
-              </View>
-              <Text style={styles.generateTitle}>Claude AI Recipe Discovery</Text>
-              <Text style={styles.generateSub}>
-                Analyzes your {pantryItems.length} pantry item{pantryItems.length !== 1 ? 's' : ''} and finds
-                the best recipes — with real nutrition data from Spoonacular.
-              </Text>
-              <Animated.View style={generateBtnStyle}>
-                <Pressable
-                  style={styles.generateBtn}
-                  onPressIn={() => { generateBtnScale.value = withSpring(0.95, { damping: 20 }); }}
-                  onPressOut={() => { generateBtnScale.value = withSpring(1, { damping: 20 }); }}
-                  onPress={handleGenerate}
-                  disabled={pantryLoading}
-                >
-                  <Text style={styles.generateBtnText}>✨  Generate Recipes</Text>
-                </Pressable>
-              </Animated.View>
-            </View>
-          </Animated.View>
-        )}
-
-        {/* ── Progress ── */}
-        {generating && progress && (
-          <View style={styles.generateSection}>
-            <GenerationProgressCard progress={progress} />
+        {recipes.length === 0 && (
+          <View style={styles.emptyWrap}>
+            <Text style={{ fontSize: 48 }}>🍽</Text>
+            <Text style={{ fontSize: 16, fontWeight: '600', color: C.textSec }}>No recipes found</Text>
+            <Text style={{ fontSize: 12, color: C.textTer, textAlign: 'center' }}>
+              Try adding more items to your pantry
+            </Text>
           </View>
         )}
 
-        {/* ── Full Match ── */}
-        {fullMatch.length > 0 && (
-          <Animated.View entering={FadeInDown.springify()} style={styles.section}>
-            <View style={styles.sectionHeader}>
-              <View style={styles.sectionTitleWrap}>
-                <Text style={styles.sectionTitle}>Ready to Cook</Text>
-                <View style={styles.sectionBadge}>
-                  <Text style={styles.sectionBadgeText}>{fullMatch.length} recipe{fullMatch.length !== 1 ? 's' : ''}</Text>
-                </View>
-              </View>
-              <Text style={styles.sectionSub}>You have all the ingredients</Text>
-            </View>
+        <TouchableOpacity style={styles.refreshCardBtn} onPress={onGenerate} activeOpacity={0.8}>
+          <Text style={styles.refreshCardBtnText}>↺ Generate New Recipes</Text>
+        </TouchableOpacity>
+      </View>
+    </ScrollView>
+  );
+}
 
-            <FeaturedRecipeCard
-              recipe={fullMatch[0]}
-              onPress={() => handleRecipePress(fullMatch[0])}
-              onSave={() => handleSave(fullMatch[0])}
-            />
+// ─── Main Export ──────────────────────────────────────────────────────────────
+export default function RecipesScreen() {
+  const { user }  = useAuth();
+  const { items } = usePantry(user?.uid ?? null);
+  const router    = useRouter();
 
-            {fullMatch.length > 1 && (
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalList}>
-                {fullMatch.slice(1).map((recipe, i) => (
-                  <View key={recipe.id} style={styles.horizontalCardWrap}>
-                    <RecipeCard recipe={recipe} onPress={() => handleRecipePress(recipe)} onSave={() => handleSave(recipe)} index={i} />
-                  </View>
-                ))}
-              </ScrollView>
-            )}
-          </Animated.View>
-        )}
+  const [recipes, setRecipes]     = useState<Recipe[]>([]);
+  const [generated, setGenerated] = useState(false);
+  const [loading, setLoading]     = useState(false);
+  const [progress, setProgress]   = useState(0);
+  const [progLabel, setProgLabel] = useState('');
+  const [cacheLabel, setCacheLabel] = useState<string | null>(null);
+  const [cacheStale, setCacheStale] = useState(false);
 
-        {/* ── Partial Match ── */}
-        {partialMatch.length > 0 && (
-          <Animated.View entering={FadeInDown.delay(100).springify()} style={styles.section}>
-            <View style={styles.sectionHeader}>
-              <View style={styles.sectionTitleWrap}>
-                <Text style={styles.sectionTitle}>Worth the Trip</Text>
-                <View style={[styles.sectionBadge, styles.sectionBadgeOrange]}>
-                  <Text style={[styles.sectionBadgeText, { color: Colors.onSecondaryContainer }]}>
-                    {partialMatch.length} recipe{partialMatch.length !== 1 ? 's' : ''}
-                  </Text>
-                </View>
-              </View>
-              <Text style={styles.sectionSub}>Missing just 1–3 ingredients</Text>
-            </View>
-            <View style={styles.partialGrid}>
-              {partialMatch.map((recipe, i) => (
-                <View key={recipe.id} style={styles.partialCardWrap}>
-                  <RecipeCard recipe={recipe} onPress={() => handleRecipePress(recipe)} onSave={() => handleSave(recipe)} index={i} />
-                </View>
-              ))}
-            </View>
-          </Animated.View>
-        )}
+  const pantryHash = useMemo(
+    () => buildPantryHash(items.map((item) => item.name)),
+    [items]
+  );
 
-        {/* ── All cooked notice ── */}
-        {generated && activeRecipes.length === 0 && cookedCount > 0 && (
-          <Animated.View entering={FadeIn} style={styles.allCookedCard}>
-            <Text style={styles.allCookedEmoji}>🎉</Text>
-            <Text style={styles.allCookedTitle}>You've cooked them all!</Text>
-            <Text style={styles.allCookedSub}>Generate new recipes to discover more dishes.</Text>
-            <TouchableOpacity style={styles.generateBtn} onPress={handleGenerate}>
-              <Text style={styles.generateBtnText}>🔄  Generate New Recipes</Text>
-            </TouchableOpacity>
-          </Animated.View>
-        )}
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
 
-        {generated && !generating && activeRecipes.length > 0 && (
-          <Animated.View entering={FadeInDown.delay(200).springify()} style={styles.regenerateWrap}>
-            <TouchableOpacity style={styles.regenerateBtn} onPress={handleGenerate}>
-              <Text style={styles.regenerateBtnText}>🔄  Generate New Recipes</Text>
-            </TouchableOpacity>
-          </Animated.View>
-        )}
+      const loadCached = async () => {
+        if (!user?.uid) {
+          if (active) {
+            setRecipes([]);
+            setGenerated(false);
+            setCacheLabel(null);
+            setCacheStale(false);
+          }
+          return;
+        }
 
-        <View style={{ height: 120 }} />
-      </ScrollView>
-    </SafeAreaView>
+        const cached = await getCachedRecipes(user.uid);
+        if (!active || !cached?.recipes?.length) return;
+
+        setRecipes(cached.recipes);
+        setGenerated(true);
+        setCacheLabel(timeAgo(cached.generatedAt));
+        setCacheStale(cached.pantryHash !== pantryHash);
+      };
+
+      void loadCached();
+
+      return () => {
+        active = false;
+      };
+    }, [pantryHash, user?.uid])
+  );
+
+  const handleGenerate = useCallback(async () => {
+    setLoading(true);
+    setProgress(0);
+    setProgLabel('Analysing your pantry…');
+
+    try {
+      const result = await generateRecipes(items, {
+        onProgress: ({ current, total, step }) => {
+          setProgress(((current + 1) / total) * 100);
+          setProgLabel(step);
+        },
+      });
+      setRecipes(result);
+      setGenerated(true);
+      setCacheLabel('just now');
+      setCacheStale(false);
+      if (user?.uid) {
+        await cacheRecipes(result, items.map((item) => item.name), user.uid);
+      }
+    } catch (error) {
+      setGenerated((prev) => prev || recipes.length > 0);
+      Alert.alert(
+        'Recipe generation unavailable',
+        error instanceof Error ? error.message : 'Please try again in a moment.'
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [items, recipes.length, user?.uid]);
+
+  const handleRecipePress = (recipe: Recipe) => {
+    router.push({ pathname: '/recipe/[id]', params: { id: recipe.id } });
+  };
+
+  if (loading) {
+    return (
+      <View style={styles.root}>
+        <LoadingScreen progress={progress} progLabel={progLabel} />
+      </View>
+    );
+  }
+
+  if (!generated) {
+    return (
+      <View style={styles.root}>
+        <PreGenerateScreen pantryCount={items.length} onGenerate={handleGenerate} />
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.root}>
+      <GeneratedScreen recipes={recipes} pantryCount={items.length}
+        onGenerate={handleGenerate} onRecipePress={handleRecipePress}
+        cacheLabel={cacheLabel} isStale={cacheStale} />
+    </View>
   );
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
-
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: Colors.background },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 14 },
-  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  headerLogo: { fontSize: 22 },
-  headerTitle: { fontSize: 22, fontWeight: '800', color: Colors.onSurface, fontStyle: 'italic', letterSpacing: -0.3 },
-  refreshChip: { backgroundColor: Colors.surfaceContainerLow, paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, borderWidth: 1, borderColor: Colors.outlineVariant },
-  refreshChipText: { fontSize: 13, fontWeight: '600', color: Colors.primary },
-  scroll: { flex: 1 },
+  root: { flex: 1, backgroundColor: C.bg },
 
-  // Hero
-  heroSection: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 20 },
-  heroLabel: { fontSize: 10, fontWeight: '700', color: Colors.primary, letterSpacing: 2, marginBottom: 8 },
-  heroTitle: { fontSize: 34, fontWeight: '800', color: Colors.onSurface, letterSpacing: -0.5, marginBottom: 6 },
-  heroSub: { fontSize: 14, color: Colors.onSurfaceVariant, lineHeight: 20 },
+  screenHeader: { paddingHorizontal: 20, paddingTop: 52, paddingBottom: 0 },
+  eyebrow: { fontSize: 11, fontWeight: '600', color: C.textTer, letterSpacing: 1.1, marginBottom: 6 },
+  heroTitle: { fontSize: 30, fontWeight: '700', color: C.text, letterSpacing: -0.5 },
 
-  // Stats
-  statsBar: { marginHorizontal: 20, marginBottom: 20, backgroundColor: Colors.surfaceContainerLowest, borderRadius: 20, flexDirection: 'row', padding: 16, borderWidth: 1, borderColor: Colors.outlineVariant },
-  statItem: { flex: 1, alignItems: 'center' },
-  statNum: { fontSize: 24, fontWeight: '800', color: Colors.primary },
-  statLabel: { fontSize: 11, fontWeight: '600', color: Colors.onSurfaceVariant, marginTop: 2 },
-  statDivider: { width: 1, backgroundColor: Colors.outlineVariant, marginHorizontal: 8 },
+  refreshBtn: {
+    backgroundColor: C.primaryLight, borderRadius: 100, paddingHorizontal: 14, paddingVertical: 7,
+  },
+  refreshBtnText: { fontSize: 12, fontWeight: '600', color: C.primary },
 
-  // Generate
-  generateSection: { paddingHorizontal: 20, marginBottom: 12 },
-  generateCard: { backgroundColor: Colors.surfaceContainerLowest, borderRadius: 28, padding: 28, alignItems: 'center', borderWidth: 1, borderColor: Colors.outlineVariant },
-  generateIconWrap: { width: 80, height: 80, borderRadius: 40, backgroundColor: Colors.primaryContainer, alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
-  generateEmoji: { fontSize: 40 },
-  generateTitle: { fontSize: 20, fontWeight: '800', color: Colors.onSurface, marginBottom: 10, textAlign: 'center' },
-  generateSub: { fontSize: 14, color: Colors.onSurfaceVariant, textAlign: 'center', lineHeight: 20, marginBottom: 24 },
-  generateBtn: { backgroundColor: Colors.primary, paddingHorizontal: 36, paddingVertical: 16, borderRadius: 20, shadowColor: Colors.primary, shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.35, shadowRadius: 12, elevation: 6 },
-  generateBtnText: { color: Colors.onPrimary, fontWeight: '700', fontSize: 16 },
+  // Stat cards
+  statRow: { flexDirection: 'row', gap: 10, marginTop: 16 },
+  statCard: {
+    flex: 1, backgroundColor: C.surface, borderRadius: 14, paddingVertical: 13, paddingHorizontal: 8,
+    alignItems: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.05, shadowRadius: 12, elevation: 2,
+  },
+  statN: { fontSize: 22, fontWeight: '700', color: C.primary, lineHeight: 26 },
+  statLabel: { fontSize: 10, fontWeight: '500', color: C.textTer, marginTop: 4 },
 
-  // Progress card
-  progressCard: { backgroundColor: Colors.surfaceContainerLowest, borderRadius: 24, padding: 24, borderWidth: 1, borderColor: Colors.outlineVariant },
-  progressCardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
-  progressEmoji: { fontSize: 32 },
-  progressDots: { flexDirection: 'row', gap: 6 },
-  dot: { width: 10, height: 10, borderRadius: 5, backgroundColor: Colors.primary },
-  progressTitle: { fontSize: 16, fontWeight: '700', color: Colors.onSurface, marginBottom: 14 },
-  progressBarTrack: { height: 6, backgroundColor: Colors.surfaceContainerHigh, borderRadius: 6, overflow: 'hidden', marginBottom: 16 },
-  progressBarFill: { height: '100%', backgroundColor: Colors.primary, borderRadius: 6 },
-  progressSteps: { flexDirection: 'row', justifyContent: 'space-between' },
-  progressStep: { alignItems: 'center', gap: 4 },
-  progressStepDot: { width: 20, height: 20, borderRadius: 10, backgroundColor: Colors.surfaceContainerHigh, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: Colors.outlineVariant },
-  progressStepDotDone: { backgroundColor: Colors.primary, borderColor: Colors.primary },
-  progressStepDotActive: { borderColor: Colors.primary, borderWidth: 2.5 },
-  progressStepCheck: { fontSize: 10, color: Colors.onPrimary, fontWeight: '700' },
-  progressStepLabel: { fontSize: 10, color: Colors.onSurfaceVariant, fontWeight: '600' },
-  progressStepLabelActive: { color: Colors.primary },
+  // Loading
+  loadingWrap: {
+    flex: 1, alignItems: 'center', justifyContent: 'center', gap: 20, paddingHorizontal: 40,
+  },
+  sparkleBubble: {
+    width: 72, height: 72, borderRadius: 36, backgroundColor: C.primaryLight,
+    alignItems: 'center', justifyContent: 'center', marginBottom: 4,
+  },
+  loadingTitle: { fontSize: 18, fontWeight: '700', color: C.text, textAlign: 'center' },
+  loadingLabel: { fontSize: 13, color: C.textTer, textAlign: 'center', lineHeight: 20 },
+  progressTrack: { height: 6, backgroundColor: C.border, borderRadius: 3, overflow: 'hidden' },
+  progressFill: { height: '100%', backgroundColor: C.primary, borderRadius: 3 },
+  stepsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
+  stepItem: { alignItems: 'center', gap: 4 },
+  stepDot: {
+    width: 18, height: 18, borderRadius: 9, backgroundColor: C.border,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  stepDotDone: { backgroundColor: C.primary },
+  stepLabel: { fontSize: 9, color: C.textTer, fontWeight: '500' },
+
+  // Pre-generate card
+  generateCard: {
+    backgroundColor: C.surface, borderRadius: 24, padding: 28, marginTop: 24, alignItems: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.07, shadowRadius: 24, elevation: 4,
+  },
+  generateTitle: { fontSize: 19, fontWeight: '700', color: C.text, marginBottom: 10, textAlign: 'center' },
+  generateDesc: { fontSize: 13, color: C.textSec, lineHeight: 22, marginBottom: 24, textAlign: 'center' },
+  generateBtn: {
+    backgroundColor: C.primary, borderRadius: 100, paddingHorizontal: 36, paddingVertical: 14,
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    shadowColor: C.primary, shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.31, shadowRadius: 20, elevation: 6,
+  },
+  generateBtnText: { fontSize: 15, fontWeight: '700', color: '#fff' },
 
   // Section
-  section: { paddingHorizontal: 20, marginBottom: 28 },
-  sectionHeader: { marginBottom: 16 },
-  sectionTitleWrap: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 4 },
-  sectionTitle: { fontSize: 24, fontWeight: '800', color: Colors.onSurface },
-  sectionBadge: { backgroundColor: Colors.primaryContainer, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
-  sectionBadgeOrange: { backgroundColor: Colors.secondaryContainer },
-  sectionBadgeText: { fontSize: 11, fontWeight: '700', color: Colors.onPrimaryContainer },
-  sectionSub: { fontSize: 13, color: Colors.onSurfaceVariant },
+  sectionTitleRow: {
+    flexDirection: 'row', alignItems: 'baseline', gap: 8, marginBottom: 14, marginTop: 4,
+  },
+  sectionTitle: { fontSize: 18, fontWeight: '700', color: C.text },
+  sectionCount: { fontSize: 13, color: C.textTer },
 
-  // Featured
-  featuredCard: { borderRadius: 24, overflow: 'hidden', marginBottom: 14, height: 260 },
-  featuredImage: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, width: '100%', height: '100%' },
-  featuredOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(11,54,29,0.55)' },
-  featuredContent: { flex: 1, padding: 20, justifyContent: 'flex-end' },
-  featuredBadges: { flexDirection: 'row', gap: 8, marginBottom: 10 },
-  matchBadgeFull: { backgroundColor: Colors.primaryContainer, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
-  matchBadgeText: { fontSize: 11, fontWeight: '700', color: Colors.onPrimaryContainer },
-  cuisineBadge: { backgroundColor: 'rgba(255,255,255,0.2)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
+  // Hero card 240px
+  heroCard: {
+    borderRadius: 22, overflow: 'hidden', height: 240, marginBottom: 12,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18, shadowRadius: 32, elevation: 8,
+  },
+  heroCardContent: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 18 },
+  fullMatchBadge: {
+    backgroundColor: C.primaryLight, paddingHorizontal: 10, paddingVertical: 3, borderRadius: 100,
+  },
+  fullMatchBadgeText: { fontSize: 11, fontWeight: '700', color: C.primary },
+  cuisineBadge: {
+    backgroundColor: 'rgba(255,255,255,0.18)', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 100,
+  },
   cuisineBadgeText: { fontSize: 11, fontWeight: '600', color: '#fff' },
-  featuredTitle: { fontSize: 24, fontWeight: '800', color: '#fff', lineHeight: 30, marginBottom: 8 },
-  featuredMeta: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 14 },
-  featuredMetaText: { fontSize: 12, color: 'rgba(255,255,255,0.85)', fontWeight: '500' },
-  featuredMetaDot: { fontSize: 12, color: 'rgba(255,255,255,0.5)' },
-  featuredActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  cookNowBtn: { backgroundColor: Colors.primary, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 16, flex: 1, alignItems: 'center' },
-  cookNowText: { color: Colors.onPrimary, fontWeight: '700', fontSize: 14 },
-  saveBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center' },
-  saveBtnText: { fontSize: 18 },
+  heroCardTitle: { fontSize: 22, fontWeight: '700', color: '#fff', lineHeight: 27, marginBottom: 10 },
+  heroCardMeta: { fontSize: 12, color: 'rgba(255,255,255,0.65)', fontWeight: '500', flex: 1 },
+  cookBtn: { backgroundColor: '#fff', borderRadius: 100, paddingHorizontal: 16, paddingVertical: 8 },
+  cookBtnText: { fontSize: 13, fontWeight: '700', color: C.primary },
 
-  // Standard card
-  recipeCard: { backgroundColor: Colors.surfaceContainerLowest, borderRadius: 20, overflow: 'hidden', borderWidth: 1, borderColor: Colors.outlineVariant },
-  cardImage: { width: '100%', height: 140 },
-  cardBookmark: { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(255,255,255,0.9)', width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
-  cardBookmarkIcon: { fontSize: 16 },
-  cardBody: { padding: 14 },
-  cardTitle: { fontSize: 15, fontWeight: '700', color: Colors.onSurface, marginBottom: 6 },
-  cardMeta: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 8 },
-  cardMetaText: { fontSize: 12, color: Colors.onSurfaceVariant, fontWeight: '500' },
-  cardMetaDot: { fontSize: 12, color: Colors.outline },
-  missingSection: { marginTop: 2 },
-  missingLabel: { fontSize: 9, fontWeight: '700', color: Colors.secondary, letterSpacing: 1.2, marginBottom: 6 },
-  missingChips: { flexDirection: 'row', gap: 6 },
-  missingChip: { backgroundColor: Colors.secondaryContainer, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
-  missingChipMore: { backgroundColor: Colors.surfaceContainerHigh },
-  missingChipText: { fontSize: 11, fontWeight: '600', color: Colors.onSecondaryContainer },
+  // Horizontal card 88px
+  horizCard: {
+    backgroundColor: C.surface, borderRadius: 18, overflow: 'hidden',
+    flexDirection: 'row', height: 88, marginBottom: 24,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.07, shadowRadius: 12, elevation: 3,
+  },
+  horizCardImage: { width: 88, height: 88, flexShrink: 0 },
+  horizCardBody: { flex: 1, paddingHorizontal: 14, paddingVertical: 12, justifyContent: 'center' },
+  horizCardTitle: { fontSize: 14, fontWeight: '700', color: C.text, lineHeight: 19, marginBottom: 3 },
+  horizCardMeta: { fontSize: 12, color: C.textTer },
 
-  // Horizontal scroll
-  horizontalList: { paddingRight: 4, gap: 12, paddingBottom: 4 },
-  horizontalCardWrap: { width: 220 },
+  // Partial match card 96px
+  partialCard: {
+    backgroundColor: C.surface, borderRadius: 18, overflow: 'hidden',
+    flexDirection: 'row', height: 96, marginBottom: 10,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06, shadowRadius: 16, elevation: 3,
+  },
+  partialCardImage: { width: 96, height: 96, flexShrink: 0 },
+  partialCardBody: {
+    flex: 1, paddingHorizontal: 14, paddingVertical: 12, justifyContent: 'space-between',
+  },
+  partialCardTitle: { fontSize: 14, fontWeight: '700', color: C.text, lineHeight: 19 },
+  partialCardMeta: { fontSize: 11, color: C.textTer, marginTop: 2 },
+  missingBadge: {
+    backgroundColor: C.amberLight, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 100,
+  },
+  missingBadgeText: { fontSize: 10, fontWeight: '600', color: C.amber },
 
-  // Partial
-  partialGrid: { gap: 14 },
-  partialCardWrap: { width: '100%' },
+  refreshCardBtn: {
+    width: '100%', marginTop: 24, paddingVertical: 14, borderRadius: 16,
+    borderWidth: 1.5, borderColor: C.border, backgroundColor: 'transparent', alignItems: 'center',
+  },
+  refreshCardBtnText: { fontSize: 14, fontWeight: '600', color: C.primary },
 
-  // All cooked
-  allCookedCard: { alignItems: 'center', paddingHorizontal: 20, paddingVertical: 40, gap: 12 },
-  allCookedEmoji: { fontSize: 56 },
-  allCookedTitle: { fontSize: 22, fontWeight: '800', color: Colors.onSurface },
-  allCookedSub: { fontSize: 14, color: Colors.onSurfaceVariant, textAlign: 'center' },
+  cacheBanner: {
+    backgroundColor: C.primaryLight,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 16,
+  },
+  cacheBannerStale: {
+    backgroundColor: C.amberLight,
+  },
+  cacheBannerText: {
+    fontSize: 12,
+    lineHeight: 18,
+    color: C.primary,
+    fontWeight: '600',
+  },
+  cacheBannerTextStale: {
+    color: C.amber,
+  },
 
-  // Regenerate
-  regenerateWrap: { paddingHorizontal: 20, marginBottom: 12 },
-  regenerateBtn: { paddingVertical: 15, borderRadius: 18, borderWidth: 1.5, borderColor: Colors.outlineVariant, alignItems: 'center', backgroundColor: Colors.surfaceContainerLowest },
-  regenerateBtnText: { color: Colors.primary, fontWeight: '600', fontSize: 15 },
+  emptyWrap: { alignItems: 'center', paddingVertical: 60, gap: 10 },
 });

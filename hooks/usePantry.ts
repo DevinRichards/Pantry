@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { PantryItem, IngredientCategory } from '@/types';
 import {
   getPantryItems,
   addPantryItem,
   updatePantryItem,
   deletePantryItem,
+  deletePantryItems,
 } from '@/services/pantryService';
 
 export function usePantry(userId: string | null) {
@@ -37,19 +38,46 @@ export function usePantry(userId: string | null) {
   };
 
   const updateItem = async (itemId: string, updates: Partial<PantryItem>) => {
-    await updatePantryItem(itemId, updates);
+    if (!userId) return;
+    await updatePantryItem(userId, itemId, updates);
     setItems((prev) =>
       prev.map((item) => (item.id === itemId ? { ...item, ...updates } : item))
     );
   };
 
   const removeItem = async (itemId: string) => {
-    await deletePantryItem(itemId);
+    if (!userId) return;
+    await deletePantryItem(userId, itemId);
     setItems((prev) => prev.filter((item) => item.id !== itemId));
   };
 
-  const getByCategory = (category: IngredientCategory) =>
-    items.filter((item) => item.category === category);
+  const removeItems = async (itemIds: string[]) => {
+    if (!userId) return;
+    await deletePantryItems(userId, itemIds);
+    const idSet = new Set(itemIds);
+    setItems((prev) => prev.filter((item) => !idSet.has(item.id)));
+  };
+
+  const itemsByCategory = useMemo(() => {
+    const grouped: Record<IngredientCategory, PantryItem[]> = {
+      fridge: [],
+      pantry: [],
+      freezer: [],
+      spices: [],
+      other: [],
+    };
+
+    for (const item of items) {
+      grouped[item.category].push(item);
+    }
+
+    return grouped;
+  }, [items]);
+
+  const getByCategory = useCallback(
+    (category: IngredientCategory) => itemsByCategory[category],
+    [itemsByCategory]
+  );
 
   return {
     items,
@@ -58,11 +86,12 @@ export function usePantry(userId: string | null) {
     addItem,
     updateItem,
     removeItem,
+    removeItems,
     refetch: fetchItems,
     getByCategory,
-    fridgeItems: getByCategory('fridge'),
-    pantryItems: getByCategory('pantry'),
-    freezerItems: getByCategory('freezer'),
-    spiceItems: getByCategory('spices'),
+    fridgeItems: itemsByCategory.fridge,
+    pantryItems: itemsByCategory.pantry,
+    freezerItems: itemsByCategory.freezer,
+    spiceItems: itemsByCategory.spices,
   };
 }
