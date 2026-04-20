@@ -12,6 +12,7 @@ import {
   TextInput,
   ActivityIndicator,
   Share,
+  Platform,
 } from 'react-native';
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -170,7 +171,7 @@ export default function RecipeDetailScreen() {
   const { user } = useAuth();
 
   const [recipe, setRecipe] = useState<Recipe | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>('ingredients');
+  const [activeTab, setActiveTab] = useState<Tab>('instructions');
   const [isSaved, setIsSaved] = useState(false);
   const [savedId, setSavedId] = useState<string | null>(null);
   const [cookingStep, setCookingStep] = useState<number | null>(null);
@@ -182,11 +183,14 @@ export default function RecipeDetailScreen() {
 
   const [speechEnabled, setSpeechEnabled] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isSpeechPaused, setIsSpeechPaused] = useState(false);
   const [updatingPantry, setUpdatingPantry] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const cookingStepRef = useRef<number | null>(null);
   // Forward refs so voice-event callbacks can call functions defined later in the component
   const speakCurrentStepRef = useRef<(stepIndex: number) => Promise<void>>(async () => {});
+  const pauseSpeakingRef = useRef<() => Promise<void>>(async () => {});
+  const resumeSpeakingRef = useRef<() => Promise<void>>(async () => {});
   const handleCookedItRef = useRef<() => Promise<void>>(async () => {});
   const startListeningRef = useRef<() => Promise<void>>(async () => {});
 
@@ -209,18 +213,29 @@ export default function RecipeDetailScreen() {
       transcript.includes('forward') ||
       transcript.includes('continue')
     ) {
+      void Speech.stop();
+      setIsSpeaking(false);
+      setIsSpeechPaused(false);
       setCookingStep((prev) => (prev !== null ? Math.min(prev + 1, 999) : prev));
     } else if (
       transcript.includes('previous') ||
       transcript.includes('back') ||
       transcript.includes('go back')
     ) {
+      void Speech.stop();
+      setIsSpeaking(false);
+      setIsSpeechPaused(false);
       setCookingStep((prev) => (prev !== null ? Math.max(prev - 1, 0) : prev));
     } else if (transcript.includes('repeat') || transcript.includes('again')) {
       void speakCurrentStepRef.current(step);
+    } else if (transcript.includes('pause')) {
+      void pauseSpeakingRef.current();
+    } else if (transcript.includes('resume')) {
+      void resumeSpeakingRef.current();
     } else if (transcript.includes('stop') || transcript.includes('quiet') || transcript.includes('mute')) {
       void Speech.stop();
       setIsSpeaking(false);
+      setIsSpeechPaused(false);
     } else if (
       transcript.includes('done') ||
       transcript.includes('finished') ||
@@ -274,6 +289,7 @@ export default function RecipeDetailScreen() {
       deactivateKeepAwake();
       void Speech.stop();
       setIsSpeaking(false);
+      setIsSpeechPaused(false);
       // Stop listening when leaving cooking mode
       if (isListening) {
         ExpoSpeechRecognitionModule?.stop();
@@ -282,6 +298,7 @@ export default function RecipeDetailScreen() {
     }
 
     return () => {
+      setIsSpeechPaused(false);
       deactivateKeepAwake();
     };
   }, [cookingStep]);
@@ -289,14 +306,10 @@ export default function RecipeDetailScreen() {
   useEffect(() => {
     return () => {
       void Speech.stop();
+      setIsSpeechPaused(false);
       deactivateKeepAwake();
     };
   }, []);
-
-  useEffect(() => {
-    if (!recipe || cookingStep === null || !speechEnabled) return;
-    void speakCurrentStepRef.current(cookingStep);
-  }, [cookingStep, speechEnabled, recipe]);
 
   const heroImage = useMemo(() => (recipe ? getRecipeImage(recipe) : ''), [recipe]);
 
@@ -380,8 +393,12 @@ export default function RecipeDetailScreen() {
       setUserRating(0);
       setUserComment('');
       Alert.alert('Thanks!', `Your ${userRating}★ rating has been saved.`);
-    } catch {
-      Alert.alert('Error', 'Could not submit rating.');
+    } catch (error) {
+      const message =
+        __DEV__ && error instanceof Error
+          ? error.message
+          : 'Could not submit rating.';
+      Alert.alert('Error', message);
     } finally {
       setSubmittingRating(false);
     }
@@ -428,7 +445,7 @@ export default function RecipeDetailScreen() {
   startListeningRef.current = startListening;
 
   const speakCurrentStep = useCallback(async (stepIndex: number) => {
-    if (!recipe) return;
+    if (!recipe || !speechEnabled) return;
 
     const narration = buildStepNarration(recipe, stepIndex);
     if (!narration) return;
@@ -436,27 +453,88 @@ export default function RecipeDetailScreen() {
     try {
       await Speech.stop();
       setIsSpeaking(true);
+      setIsSpeechPaused(false);
 
       Speech.speak(narration, {
         rate: 0.95,
         pitch: 1.0,
-        onDone: () => setIsSpeaking(false),
-        onStopped: () => setIsSpeaking(false),
-        onError: () => setIsSpeaking(false),
+        onDone: () => {
+          setIsSpeaking(false);
+          setIsSpeechPaused(false);
+        },
+        onStopped: () => {
+          setIsSpeaking(false);
+          setIsSpeechPaused(false);
+        },
+        onError: () => {
+          setIsSpeaking(false);
+          setIsSpeechPaused(false);
+        },
       });
     } catch {
       setIsSpeaking(false);
+      setIsSpeechPaused(false);
     }
-  }, [recipe]);
+  }, [recipe, speechEnabled]);
 
   // Keep forward-refs in sync so voice event handlers (defined before these fns) stay current
   useEffect(() => { speakCurrentStepRef.current = speakCurrentStep; }, [speakCurrentStep]);
+
+  const handlePauseSpeaking = async () => {
+    if (!isSpeaking || isSpeechPaused) return;
+
+    try {
+      if (Platform.OS === 'android') {
+        await Speech.stop();
+        setIsSpeaking(false);
+        setIsSpeechPaused(false);
+        Alert.alert('Pause unavailable', 'Voice pause is not supported on Android yet. Tap Read Step to start this step again.');
+        return;
+      }
+
+      await Speech.pause();
+      setIsSpeechPaused(true);
+    } catch {
+      setIsSpeechPaused(false);
+    }
+  };
+
+  const handleResumeSpeaking = async () => {
+    if (cookingStep === null || !speechEnabled) return;
+
+    try {
+      if (Platform.OS === 'android') {
+        await speakCurrentStep(cookingStep);
+        return;
+      }
+
+      await Speech.resume();
+      setIsSpeaking(true);
+      setIsSpeechPaused(false);
+    } catch {
+      setIsSpeaking(false);
+      setIsSpeechPaused(false);
+    }
+  };
+
+  useEffect(() => { pauseSpeakingRef.current = handlePauseSpeaking; }, [handlePauseSpeaking]);
+  useEffect(() => { resumeSpeakingRef.current = handleResumeSpeaking; }, [handleResumeSpeaking]);
 
   const handleStopSpeaking = async () => {
     try {
       await Speech.stop();
       setIsSpeaking(false);
+      setIsSpeechPaused(false);
     } catch {}
+  };
+
+  const toggleSpeechEnabled = async () => {
+    const nextValue = !speechEnabled;
+    setSpeechEnabled(nextValue);
+
+    if (!nextValue) {
+      await handleStopSpeaking();
+    }
   };
 
   const handleCookedIt = async () => {
@@ -534,7 +612,7 @@ export default function RecipeDetailScreen() {
               <Text style={styles.voiceToggleText}>{isListening ? '🎙️' : '🎤'}</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              onPress={() => setSpeechEnabled((prev) => !prev)}
+              onPress={() => void toggleSpeechEnabled()}
               style={styles.voiceToggle}
             >
               <Text style={styles.voiceToggleText}>{speechEnabled ? '🔊' : '🔈'}</Text>
@@ -563,17 +641,27 @@ export default function RecipeDetailScreen() {
           <TouchableOpacity
             style={styles.voiceActionBtn}
             onPress={() => speakCurrentStep(cookingStep)}
+            disabled={!speechEnabled}
           >
             <Text style={styles.voiceActionText}>▶ Read Step</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
             style={[styles.voiceActionBtn, styles.voiceActionBtnSecondary]}
-            onPress={handleStopSpeaking}
+            onPress={isSpeechPaused ? handleResumeSpeaking : handlePauseSpeaking}
+            disabled={!speechEnabled || (!isSpeaking && !isSpeechPaused)}
           >
             <Text style={styles.voiceActionTextSecondary}>
-              {isSpeaking ? '■ Stop Voice' : 'Voice Off'}
+              {isSpeechPaused ? '▶ Resume Voice' : isSpeaking ? '⏸ Pause Voice' : 'Pause Voice'}
             </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.voiceActionBtn, styles.voiceActionBtnSecondary]}
+            onPress={handleStopSpeaking}
+            disabled={!speechEnabled || (!isSpeaking && !isSpeechPaused)}
+          >
+            <Text style={styles.voiceActionTextSecondary}>■ Stop Voice</Text>
           </TouchableOpacity>
         </View>
 
@@ -601,9 +689,14 @@ export default function RecipeDetailScreen() {
         </ScrollView>
 
         <View style={styles.cookingNav}>
-          <TouchableOpacity
-            style={[styles.cookingNavBtn, styles.cookingNavPrev, cookingStep === 0 && styles.disabledBtn]}
-            onPress={() => setCookingStep(Math.max(0, cookingStep - 1))}
+            <TouchableOpacity
+              style={[styles.cookingNavBtn, styles.cookingNavPrev, cookingStep === 0 && styles.disabledBtn]}
+            onPress={() => {
+              void Speech.stop();
+              setIsSpeaking(false);
+              setIsSpeechPaused(false);
+              setCookingStep(Math.max(0, cookingStep - 1));
+            }}
             disabled={cookingStep === 0}
           >
             <Text style={styles.cookingNavPrevText}>← Previous</Text>
@@ -612,7 +705,12 @@ export default function RecipeDetailScreen() {
           {cookingStep < totalSteps - 1 ? (
             <TouchableOpacity
               style={[styles.cookingNavBtn, styles.cookingNavNext]}
-              onPress={() => setCookingStep(cookingStep + 1)}
+              onPress={() => {
+                void Speech.stop();
+                setIsSpeaking(false);
+                setIsSpeechPaused(false);
+                setCookingStep(cookingStep + 1);
+              }}
             >
               <Text style={styles.cookingNavNextText}>Next Step →</Text>
             </TouchableOpacity>
@@ -714,7 +812,9 @@ export default function RecipeDetailScreen() {
                 style={[styles.tab, activeTab === tab && styles.tabActive]}
               >
                 <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
-                  {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                  {tab === 'instructions'
+                    ? 'How to Cook'
+                    : tab.charAt(0).toUpperCase() + tab.slice(1)}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -759,29 +859,40 @@ export default function RecipeDetailScreen() {
 
           {activeTab === 'instructions' && (
             <Animated.View entering={FadeIn.duration(180)} style={styles.tabContent}>
-              {recipe.steps.map((step, i) => (
-                <Animated.View
-                  key={`${step.stepNumber}-${i}`}
-                  entering={FadeInDown.delay(i * 50).springify()}
-                  style={styles.stepRow}
-                >
-                  <View style={[styles.stepNum, i === 0 && styles.stepNumActive]}>
-                    <Text style={[styles.stepNumText, i === 0 && { color: Colors.onPrimary }]}>
-                      {step.stepNumber}
-                    </Text>
-                  </View>
+              {recipe.steps.length > 0 ? (
+                <>
+                  {recipe.steps.map((step, i) => (
+                    <Animated.View
+                      key={`${step.stepNumber}-${i}`}
+                      entering={FadeInDown.delay(i * 50).springify()}
+                      style={styles.stepRow}
+                    >
+                      <View style={[styles.stepNum, i === 0 && styles.stepNumActive]}>
+                        <Text style={[styles.stepNumText, i === 0 && { color: Colors.onPrimary }]}>
+                          {step.stepNumber}
+                        </Text>
+                      </View>
 
-                  <View style={styles.stepContent}>
-                    <Text style={styles.stepTitleSmall}>{step.title}</Text>
-                    <Text style={styles.stepDescSmall}>{step.description}</Text>
-                    {!!step.tip && <Text style={styles.stepTipSmall}>💡 {step.tip}</Text>}
-                  </View>
-                </Animated.View>
-              ))}
+                      <View style={styles.stepContent}>
+                        <Text style={styles.stepTitleSmall}>{step.title}</Text>
+                        <Text style={styles.stepDescSmall}>{step.description}</Text>
+                        {!!step.tip && <Text style={styles.stepTipSmall}>💡 {step.tip}</Text>}
+                      </View>
+                    </Animated.View>
+                  ))}
 
-              <TouchableOpacity style={styles.startCookingBtn} onPress={() => setCookingStep(0)}>
-                <Text style={styles.startCookingText}>▶ Start Cooking Mode</Text>
-              </TouchableOpacity>
+                  <TouchableOpacity style={styles.startCookingBtn} onPress={() => setCookingStep(0)}>
+                    <Text style={styles.startCookingText}>▶ Start Cooking Mode</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <View style={styles.emptyInstructions}>
+                  <Text style={styles.emptyInstructionsTitle}>No cooking steps yet</Text>
+                  <Text style={styles.emptyInstructionsText}>
+                    This recipe did not include step-by-step instructions.
+                  </Text>
+                </View>
+              )}
             </Animated.View>
           )}
 
@@ -808,12 +919,27 @@ export default function RecipeDetailScreen() {
 
       <Animated.View entering={FadeInUp.delay(250).springify()} style={styles.bottomBar}>
         <SafeAreaView style={styles.bottomBarInner}>
-          <TouchableOpacity style={styles.bottomSecondaryBtn} onPress={() => setShowRatingModal(true)}>
-            <Text style={styles.bottomSecondaryBtnText}>⭐ Rate</Text>
+          <TouchableOpacity
+            style={styles.bottomSecondaryBtn}
+            onPress={() => setActiveTab('ingredients')}
+          >
+            <Text style={styles.bottomSecondaryBtnText}>🥕 Ingredients</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.bottomPrimaryBtn} onPress={handleAddMissingToCart}>
-            <Text style={styles.bottomPrimaryBtnText}>🛒 Shop Missing</Text>
+          <TouchableOpacity
+            style={styles.bottomPrimaryBtn}
+            onPress={() => {
+              if (recipe.steps.length > 0) {
+                setActiveTab('instructions');
+                setCookingStep(0);
+                return;
+              }
+              setActiveTab('instructions');
+            }}
+          >
+            <Text style={styles.bottomPrimaryBtnText}>
+              {recipe.steps.length > 0 ? '▶ Cook Now' : '📖 How to Cook'}
+            </Text>
           </TouchableOpacity>
         </SafeAreaView>
       </Animated.View>
@@ -1182,6 +1308,22 @@ const styles = StyleSheet.create({
     color: Colors.tertiary,
     marginTop: 8,
     fontStyle: 'italic',
+  },
+  emptyInstructions: {
+    backgroundColor: Colors.surfaceVariant,
+    borderRadius: 18,
+    padding: 18,
+  },
+  emptyInstructionsTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: Colors.onSurface,
+    marginBottom: 6,
+  },
+  emptyInstructionsText: {
+    fontSize: 14,
+    color: Colors.onSurfaceVariant,
+    lineHeight: 20,
   },
 
   startCookingBtn: {

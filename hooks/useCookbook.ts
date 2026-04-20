@@ -10,6 +10,7 @@ import {
 export interface CookbookRecipe {
   id: string;           // savedRecipe doc id
   recipeId: string;
+  recipe: Recipe;
   title: string;
   imageUrl?: string;
   cookTime?: number;
@@ -24,6 +25,7 @@ function toCookbookRecipe(saved: Awaited<ReturnType<typeof getSavedRecipes>>[num
   return {
     id: saved.id,
     recipeId: saved.recipeId,
+    recipe: saved.recipe,
     title: saved.recipe.title,
     imageUrl: saved.recipe.imageUrl,
     cookTime: saved.recipe.cookTime,

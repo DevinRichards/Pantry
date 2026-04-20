@@ -29,7 +29,7 @@ const SHOPPING_CATEGORIES: ShoppingCategory[] = [
   'Other',
 ];
 
-function omitUndefined<T extends Record<string, unknown>>(value: T): T {
+export function omitUndefined<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, entryValue]) => entryValue !== undefined)
   ) as T;

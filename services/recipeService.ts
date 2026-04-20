@@ -16,6 +16,7 @@ import {
   assertDocumentOwner,
   assertValidDocId,
   assertValidUserId,
+  omitUndefined,
   sanitizeComment,
   sanitizeNotes,
   sanitizeRating,
@@ -113,6 +114,7 @@ export async function addRating(
   // Fetch saved recipe docs that need their rating fields updated
   const savedQuery = query(
     collection(db, SAVED_COLLECTION),
+    where('userId', '==', safeUserId),
     where('recipeId', '==', safeRecipeId)
   );
   const savedSnap = await getDocs(savedQuery);
@@ -132,13 +134,13 @@ export async function addRating(
     newCount = allRatings.length; // count stays the same
     newAverage = (totalWithoutOld + safeRating) / newCount;
 
-    ratingData = {
+    ratingData = omitUndefined({
       recipeId: safeRecipeId,
       userId: safeUserId,
       rating: safeRating,
       comment: safeComment,
       createdAt: existingSnap.docs[0].data().createdAt as string,
-    };
+    }) as Omit<RecipeRating, 'id'>;
   } else {
     // New rating
     ratingDocRef = doc(collection(db, RATINGS_COLLECTION));
@@ -146,13 +148,13 @@ export async function addRating(
     newCount = allRatings.length + 1;
     newAverage = (totalExisting + safeRating) / newCount;
 
-    ratingData = {
+    ratingData = omitUndefined({
       recipeId: safeRecipeId,
       userId: safeUserId,
       rating: safeRating,
       comment: safeComment,
       createdAt: new Date().toISOString(),
-    };
+    }) as Omit<RecipeRating, 'id'>;
   }
 
   // Round average to 1 decimal place
@@ -216,9 +218,9 @@ export async function updateSavedRecipeNotes(
   userComment?: string
 ): Promise<void> {
   await assertDocumentOwner(SAVED_COLLECTION, savedId, userId);
-  await updateDoc(doc(db, SAVED_COLLECTION, assertValidDocId(savedId)), {
+  await updateDoc(doc(db, SAVED_COLLECTION, assertValidDocId(savedId)), omitUndefined({
     notes: sanitizeNotes(notes),
     userRating: userRating == null ? undefined : sanitizeRating(userRating),
     userComment: sanitizeComment(userComment),
-  });
+  }));
 }

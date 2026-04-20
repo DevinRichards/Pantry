@@ -390,7 +390,10 @@ export default function RecipesScreen() {
   }, [items, recipes.length, user?.uid]);
 
   const handleRecipePress = (recipe: Recipe) => {
-    router.push({ pathname: '/recipe/[id]', params: { id: recipe.id } });
+    router.push({
+      pathname: '/recipe/[id]',
+      params: { id: recipe.id, recipe: JSON.stringify(recipe) },
+    });
   };
 
   if (loading) {

@@ -16,6 +16,16 @@ const MODEL = 'claude-opus-4-6';
 const API_TIMEOUT_MS = 45_000; // 45s — recipe gen can be slow
 const ANTHROPIC_PROXY_URL = getOptionalProxyUrl(process.env.EXPO_PUBLIC_ANTHROPIC_PROXY_URL);
 
+class AnthropicRequestError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'AnthropicRequestError';
+    this.status = status;
+  }
+}
+
 async function getAnthropicRequest(): Promise<{
   url: string;
   headers: Record<string, string>;
@@ -59,6 +69,32 @@ async function postAnthropic(body: Record<string, unknown>): Promise<Response> {
     headers: request.headers,
     body: JSON.stringify(body),
   });
+}
+
+async function getResponseDebugMessage(
+  response: Response,
+  fallbackMessage: string
+): Promise<string> {
+  if (!__DEV__) return fallbackMessage;
+
+  let details = '';
+  try {
+    const responseText = await response.text();
+    details = responseText.slice(0, 300).trim();
+  } catch {
+    details = '';
+  }
+
+  const statusLine = `Request failed (${response.status}${response.statusText ? ` ${response.statusText}` : ''})`;
+  return details ? `${statusLine}: ${details}` : statusLine;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableAnthropicStatus(status: number): boolean {
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
 }
 
 // ─── Ingredient Detection from Photo ─────────────────────────────────────────
@@ -106,7 +142,10 @@ Be thorough but only include items you can actually see or strongly infer from t
   });
 
   if (!response.ok) {
-    throw new Error('AI ingredient detection is temporarily unavailable.');
+    throw new AnthropicRequestError(
+      await getResponseDebugMessage(response, 'AI ingredient detection is temporarily unavailable.'),
+      response.status
+    );
   }
 
   const data = await response.json();
@@ -317,7 +356,10 @@ async function generateSingleRecipe(
   });
 
   if (!response.ok) {
-    throw new Error('Recipe generation is temporarily unavailable.');
+    throw new AnthropicRequestError(
+      await getResponseDebugMessage(response, 'Recipe generation is temporarily unavailable.'),
+      response.status
+    );
   }
 
   const data = await response.json();
@@ -337,7 +379,7 @@ async function generateSingleRecipeWithRetry(
   preferences: RecipePreferences | undefined,
   options: SingleRecipeOptions,
   recipeNumber: number,
-  maxAttempts = 2
+  maxAttempts = 4
 ): Promise<Recipe> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -347,6 +389,15 @@ async function generateSingleRecipeWithRetry(
       lastError = error;
       if (__DEV__) {
         console.warn(`Recipe ${recipeNumber} attempt ${attempt} failed.`);
+      }
+
+      if (
+        attempt < maxAttempts &&
+        error instanceof AnthropicRequestError &&
+        isRetryableAnthropicStatus(error.status)
+      ) {
+        await sleep(attempt * 1000);
+        continue;
       }
     }
   }
@@ -403,27 +454,43 @@ export async function generateRecipes(
 
   // ── Recipe 2: Full match (variety) ──
   onProgress?.({ step: 'Generating recipe 2 of 3…', current: 1, total: 4 });
-  const recipe2 = await generateSingleRecipeWithRetry(pantryItems, preferences, {
-    matchType: 'full',
-    excludeTitles: recipes.map((r) => r.title),
-    excludeCuisines: recipes.map((r) => r.cuisine ?? ''),
-  }, 2);
-  recipes.push(recipe2);
-  enrichmentTasks.push(enrichWithSpoonacular(recipe2));
+  try {
+    const recipe2 = await generateSingleRecipeWithRetry(pantryItems, preferences, {
+      matchType: 'full',
+      excludeTitles: recipes.map((r) => r.title),
+      excludeCuisines: recipes.map((r) => r.cuisine ?? ''),
+    }, 2);
+    recipes.push(recipe2);
+    enrichmentTasks.push(enrichWithSpoonacular(recipe2));
+  } catch (error) {
+    if (__DEV__) {
+      console.warn('Skipping recipe 2 after repeated AI failures.', error);
+    }
+  }
 
   // ── Recipe 3: Partial match ──
   onProgress?.({ step: 'Generating recipe 3 of 3…', current: 2, total: 4 });
-  const recipe3 = await generateSingleRecipeWithRetry(pantryItems, preferences, {
-    matchType: 'partial',
-    excludeTitles: recipes.map((r) => r.title),
-    excludeCuisines: recipes.map((r) => r.cuisine ?? ''),
-  }, 3);
-  recipes.push(recipe3);
-  enrichmentTasks.push(enrichWithSpoonacular(recipe3));
+  try {
+    const recipe3 = await generateSingleRecipeWithRetry(pantryItems, preferences, {
+      matchType: 'partial',
+      excludeTitles: recipes.map((r) => r.title),
+      excludeCuisines: recipes.map((r) => r.cuisine ?? ''),
+    }, 3);
+    recipes.push(recipe3);
+    enrichmentTasks.push(enrichWithSpoonacular(recipe3));
+  } catch (error) {
+    if (__DEV__) {
+      console.warn('Skipping recipe 3 after repeated AI failures.', error);
+    }
+  }
 
   // ── Enrich all recipes with Spoonacular (image + real nutrition) ──
   onProgress?.({ step: 'Adding nutrition data…', current: 3, total: 4 });
   const enriched = await Promise.all(enrichmentTasks);
+
+  if (enriched.length === 0) {
+    throw new Error('Recipe generation is temporarily unavailable. Please try again.');
+  }
 
   return enriched;
 }

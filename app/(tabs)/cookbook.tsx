@@ -86,8 +86,11 @@ export default function CookbookScreen() {
     [recipes]
   );
 
-  const handleRecipePress = (recipeId: string) => {
-    router.push({ pathname: '/recipe/[id]', params: { id: recipeId } });
+  const handleRecipePress = (recipe: CookbookRecipe) => {
+    router.push({
+      pathname: '/recipe/[id]',
+      params: { id: recipe.recipeId, recipe: JSON.stringify(recipe.recipe) },
+    });
   };
 
   const renderRecipe = ({ item }: { item: CookbookRecipe }) => {
@@ -95,7 +98,7 @@ export default function CookbookScreen() {
 
     return (
       <TouchableOpacity style={styles.recipeCard}
-        onPress={() => handleRecipePress(item.id)} activeOpacity={0.9}>
+        onPress={() => handleRecipePress(item)} activeOpacity={0.9}>
         <View style={styles.heroImageWrap}>
           {item.imageUrl ? (
             <Image source={{ uri: item.imageUrl }} style={StyleSheet.absoluteFillObject} resizeMode="cover" />
